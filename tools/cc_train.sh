@@ -25,7 +25,7 @@ HOME_DIR=/home/spapais/projects/rrg-swasland/spapais
 TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Slurm unzip alternative
 PROJ_DIR=$HOME_DIR/StreamPETR
-OUT_DIR=$HOME_DIR/output
+OUT_DIR=$HOME_DIR/output/streampetr_jdmp
 
 # Extract Dataset
 echo "Extracting data"
@@ -48,7 +48,7 @@ VOLUMES="--bind=$PROJ_DIR:/proj
          --bind=$OUT_DIR:/proj/output
         "
 CFG_FILE=projects/configs/StreamPETR/$CFG_NAME.py
-WRK_DIR=output/stream_petr/train_$CFG_NAME/
+WRK_DIR=output/train_$CFG_NAME/
 
 # Command
 BASE_CMD="./tools/dist_train.sh $CFG_FILE $NUM_GPUS --work-dir $WRK_DIR"
