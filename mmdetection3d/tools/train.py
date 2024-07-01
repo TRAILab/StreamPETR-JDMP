@@ -178,6 +178,7 @@ def main():
     # dump config
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config))[:-2]+'yaml')
+    print(f'Config dumped to {osp.join(cfg.work_dir, osp.basename(args.config))[:-2]+'yaml'}')
     # init the logger before other steps
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
