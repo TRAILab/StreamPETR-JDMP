@@ -178,7 +178,6 @@ def main():
     # dump config
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config)))
     cfg.dump(osp.join(cfg.work_dir, osp.basename(args.config))[:-2]+'yaml')
-    logger.info(f'Config dumped to {osp.join(cfg.work_dir, osp.basename(args.config))[:-2]+'yaml'}')
     # init the logger before other steps
     timestamp = time.strftime('%Y%m%d_%H%M%S', time.localtime())
     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
@@ -191,6 +190,7 @@ def main():
         logger_name = 'mmdet'
     logger = get_root_logger(
         log_file=log_file, log_level=cfg.log_level, name=logger_name)
+    logger.info(f'Config dumped to {osp.join(cfg.work_dir, osp.basename(args.config))[:-2]+'yaml'}')
 
     # init the meta dict to record some important information such as
     # environment info and seed, which will be logged
