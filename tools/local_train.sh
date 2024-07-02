@@ -10,7 +10,7 @@ DOCKER_IMG=spapais/streampetr:latest
 HOME_DIR=/home/trail/workspace
 PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 DATA_DIR=/data/sets/nuscenes
-OUTPUT_DIR=$HOME_DIR/output/streampetr_jdmp
+OUTPUT_DIR=$HOME_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
@@ -31,6 +31,7 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 BASE_CMD="tools/dist_train.sh $CONFIG_FILE $NUM_GPUS --work-dir $WRK_DIR"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
+--env="WANDB_API_KEY=$WANDB_API_KEY"
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"

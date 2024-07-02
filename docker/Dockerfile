@@ -40,5 +40,7 @@ RUN conda clean --all \
 
 # Additional missing packages and error fixes
 RUN pip install fvcore yapf==0.40.1
+RUN pip install wandb
+RUN git config --global --add safe.directory '*'
 
 WORKDIR /workspace/StreamPETR/

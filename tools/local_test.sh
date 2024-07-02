@@ -10,7 +10,7 @@ DOCKER_IMG=spapais/streampetr:latest
 HOME_DIR=/home/trail/workspace
 PROJ_DIR=$HOME_DIR/StreamPETR
 DATA_DIR=/data/sets/nuscenes
-OUTPUT_DIR=$HOME_DIR/output/streampetr_jdmp
+OUTPUT_DIR=$HOME_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
@@ -33,6 +33,7 @@ DATE_TIME=$(date +"%Y%m%d_%H%M%S")
 BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox"
 
 CONTAINER_CMD="docker run -d --ipc host --gpus $GPUS -w /proj/
+--env="WANDB_API_KEY=$WANDB_API_KEY"
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"
