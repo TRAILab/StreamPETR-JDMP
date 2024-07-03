@@ -1,10 +1,10 @@
 #!/bin/bash
-#SBATCH --job-name=train_stream_petr_r50_flash_704_bs2_seq_428q_nui_60e_4gpu    # Job name
+#SBATCH --job-name=test_stream_petr_r50_flash_704_bs4_seq_428q_nui_60e_4gpu    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=180gb                     # Job memory request
 #SBATCH --time=3-00:00:00               # Time limit hrs:min:sec
-#SBATCH --output=./output/streampetr_jdmp/%x-%j.log   # Standard output and error log
+#SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:t4:4
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
@@ -12,8 +12,9 @@
 
 # Parameters
 NUM_GPUS=4
-CFG_NAME=stream_petr_r50_flash_704_bs2_seq_428q_nui_60e_4gpu
+CFG_NAME=stream_petr_r50_flash_704_bs4_seq_428q_nui_60e_4gpu
 SING_IMG=/home/spapais/projects/rrg-swasland/singularity/streampetr.sif
+WANDB_MODE='offline'
 echo "SLURM_JOB_ID=$SLURM_JOB_ID
 CFG_NAME=$CFG_NAME
 NUM_GPUS=$NUM_GPUS
@@ -21,10 +22,10 @@ NUM_GPUS=$NUM_GPUS
 
 # Host paths
 DATA_DIR=/home/spapais/projects/rrg-swasland/Datasets/nuscenes
-HOME_DIR=/home/spapais/projects/rrg-swasland/spapais
+HOME_DIR=/home/spapais
 TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Slurm unzip alternative
-PROJ_DIR=$HOME_DIR/StreamPETR
+PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 OUT_DIR=$HOME_DIR/output/streampetr_jdmp
 
 # Extract Dataset
