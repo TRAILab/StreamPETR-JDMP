@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_stream_petr_r50_flash_704_bs4_seq_428q_nui_60e_4gpu    # Job name
+#SBATCH --job-name=train_streampetr_jdmp_forecast_cv    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=180gb                     # Job memory request
@@ -12,7 +12,7 @@
 
 # Parameters
 NUM_GPUS=4
-CFG_NAME=stream_petr_r50_flash_704_bs4_seq_428q_nui_60e_4gpu
+CFG_NAME=streampetr_jdmp_forecast_cv
 SING_IMG=/home/spapais/projects/rrg-swasland/singularity/streampetr.sif
 WANDB_MODE='offline'
 echo "SLURM_JOB_ID=$SLURM_JOB_ID
