@@ -18,15 +18,18 @@ module load apptainer
 
 while :
 do
-    RUN_DIR=(wandb/offline-*)
-    CONTAINER_CMD="apptainer --silent exec --nv -c -e --pwd /
-    --env "WANDB_API_KEY=$WANDB_API_KEY"
-    --bind=$HOST_DIR/:$CONTAINER_DIR/
-    $SING_IMG
-    wandb sync $RUN_DIR"
+    RUN_DIRS=(wandb/offline-*/)
     date
-    echo "running wandb sync $RUN_DIR" 
-    eval $CONTAINER_CMD
+    for RUN_DIR in "${RUN_DIRS[@]}"
+    do
+        echo "running wandb sync $RUN_DIR"
+        CONTAINER_CMD="apptainer --silent exec --nv -c -e --pwd /
+        --env "WANDB_API_KEY=$WANDB_API_KEY"
+        --bind=$HOST_DIR/:$CONTAINER_DIR/
+        $SING_IMG
+        wandb sync $RUN_DIR"
+        eval $CONTAINER_CMD
+    done
     echo ""
-    sleep 3600
+    sleep 600
 done
