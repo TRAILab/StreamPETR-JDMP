@@ -10,7 +10,7 @@ DOCKER_IMG=spapais/streampetr:latest
 HOME_DIR=/home/trail/workspace
 PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 DATA_DIR=/data/sets/nuscenes
-OUTPUT_DIR=$HOME_DIR/output
+OUTPUT_DIR=$PROJ_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
