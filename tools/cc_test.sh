@@ -3,7 +3,7 @@
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=180gb                     # Job memory request
-#SBATCH --time=3-00:00:00               # Time limit hrs:min:sec
+#SBATCH --time=11:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:t4:4
