@@ -315,6 +315,90 @@ class StreamPETRHead(AnchorFreeHead):
         self.memory_timestamp = None
         self.memory_egopose = None
         self.memory_velo = None
+        self.memory_rotation = None
+        self.memory_class = None
+        self.track_position = None
+        self.track_timestamp = None
+        self.track_rotation = None
+        self.track_class = None
+        self.track_velocity = None
+
+
+    def update_tracks(self, data):
+        if self.memory_reference_point is None:
+            return
+        self.track_max_dist = 5.0
+        self.track_max_dt = 10.0
+        x = data['prev_exists']
+        B = x.size(0)
+        # refresh the memory when the scene changes
+        if self.track_position is None:
+            self.track_position = x.new_zeros(B, self.memory_len, 6, 3)
+            self.track_rotation = x.new_zeros(B, self.memory_len, 6, 1)
+            self.track_velocity = x.new_zeros(B, self.memory_len, 6, 2)
+            self.track_class = x.new_zeros(B, self.memory_len, 6, 1)
+            self.track_timestamp = x.new_zeros(B, self.memory_len, 1)
+        else:
+            # self.track_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
+            self.track_position = memory_refresh(self.track_position[:, :self.memory_len], x)
+            self.track_rotation = memory_refresh(self.track_rotation[:, :self.memory_len], x)
+            self.track_velocity = memory_refresh(self.track_velocity[:, :self.memory_len], x)
+            self.track_class = memory_refresh(self.track_class[:, :self.memory_len], x)
+            self.track_timestamp = memory_refresh(self.track_timestamp[:, :self.memory_len], x) 
+        # Compute the minimum distance assignment between the recent memory and tracks
+        timestep = self.track_timestamp.float() + data['timestamp'].unsqueeze(-1).unsqueeze(-1)
+        prop_track_position = self.track_position[...,-1,:] + timestep*torch.nn.functional.pad(self.track_velocity[...,-1,:], (0,1)) # TODO: frame transform on vel?
+        distance = prop_track_position.reshape(B, 1, -1, 3) - self.memory_reference_point[:, :self.num_propagated].reshape(B, -1, 1, 3)*x.view(B, 1, 1, 1)
+        distance = torch.linalg.vector_norm(distance, dim=-1)
+        distance += (1 - x).view(B, 1, 1) * 1e6
+        distance += timestep.reshape(B, 1, -1) > self.track_max_dt * 1e6
+        min_distances, track_indices = torch.min(distance, dim=-1)
+        # Find matches between tracks and detections
+        match_mask = min_distances.reshape(-1) < self.track_max_dist
+        match_track_indices = track_indices.reshape(-1)[match_mask]
+        match_det_indices = torch.arange(self.num_propagated, device=x.device).repeat(B)[match_mask]
+        match_batch_indices = torch.arange(B, device=x.device).repeat_interleave(self.num_propagated)[match_mask]
+        # Update track memory: shift over and add new matched detections
+        if len(match_track_indices) > 0:
+            self.track_position[match_batch_indices, match_track_indices, :-1, :] = self.track_position[match_batch_indices, match_track_indices, 1:, :]
+            self.track_position[match_batch_indices, match_track_indices, -1, :] = self.memory_reference_point[match_batch_indices, match_det_indices]
+            self.track_velocity[match_batch_indices, match_track_indices, :-1, :] = self.track_velocity[match_batch_indices, match_track_indices, 1:, :]
+            self.track_velocity[match_batch_indices, match_track_indices, -1, :] = self.memory_velo[match_batch_indices, match_det_indices]
+            self.track_rotation[match_batch_indices, match_track_indices, :-1] = self.track_rotation[match_batch_indices, match_track_indices, 1:]
+            self.track_rotation[match_batch_indices, match_track_indices, -1] = self.memory_rotation[match_batch_indices, match_det_indices]
+            self.track_class[match_batch_indices, match_track_indices, :-1] = self.track_class[match_batch_indices, match_track_indices, 1:]
+            self.track_class[match_batch_indices, match_track_indices, -1] = self.memory_class[match_batch_indices, match_det_indices]
+            self.track_timestamp[match_batch_indices, match_track_indices] = self.memory_timestamp[match_batch_indices, match_det_indices].float()
+        # Sort by timestep
+        timestep_sorted, sort_indices = torch.sort(timestep.squeeze(-1), stable=True)
+        self.track_position = torch.gather(self.track_position, 1, sort_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 6, 3))
+        self.track_velocity = torch.gather(self.track_velocity, 1, sort_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 6, 2))
+        self.track_timestamp = torch.gather(self.track_timestamp, 1, sort_indices.unsqueeze(-1))
+        self.track_rotation = torch.gather(self.track_rotation, 1, sort_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 6, 1))
+        self.track_class = torch.gather(self.track_class, 1, sort_indices.unsqueeze(-1).unsqueeze(-1).repeat(1, 1, 6, 1))
+        # Reset oldest tracks and swap in unmatched detections
+        unmatch_det_indices = torch.arange(self.num_propagated, device=x.device).repeat(B)[~match_mask]
+        unmatch_batch_indices = torch.arange(B, device=x.device).repeat_interleave(self.num_propagated)[~match_mask]
+        unmatch_batch, unmatch_batch_counts = torch.unique(unmatch_batch_indices, return_counts=True)
+        unmatch_track_indices = torch.cat([-count+torch.arange(count, device=x.device) for count in unmatch_batch_counts])
+        if len(unmatch_batch_indices) > 0:
+            self.track_position[unmatch_batch_indices, unmatch_track_indices, :, :] = 0.0
+            self.track_position[unmatch_batch_indices, unmatch_track_indices, -1, :] = self.memory_reference_point[unmatch_batch_indices, unmatch_det_indices]
+            self.track_velocity[unmatch_batch_indices, unmatch_track_indices, :, :] = 0.0
+            self.track_velocity[unmatch_batch_indices, unmatch_track_indices, -1, :] = self.memory_velo[unmatch_batch_indices, unmatch_det_indices]
+            self.track_timestamp[unmatch_batch_indices, unmatch_track_indices] = self.memory_timestamp[unmatch_batch_indices, unmatch_det_indices].float()
+            self.track_rotation[unmatch_batch_indices, unmatch_track_indices, :] = 0.0
+            self.track_rotation[unmatch_batch_indices, unmatch_track_indices, -1] = self.memory_rotation[unmatch_batch_indices, unmatch_det_indices]
+            self.track_class[unmatch_batch_indices, unmatch_track_indices, :] = 0.0
+            self.track_class[unmatch_batch_indices, unmatch_track_indices, -1] = self.memory_class[unmatch_batch_indices, unmatch_det_indices]
+        # TODO: filter based on conf scores
+        # TODO: add class constraint to matching
+        return
+
+
+    def update_forecasts(self):
+        pass # TODO: implement this
+
 
     def pre_update_memory(self, data):
         x = data['prev_exists']
@@ -326,6 +410,8 @@ class StreamPETRHead(AnchorFreeHead):
             self.memory_timestamp = x.new_zeros(B, self.memory_len, 1)
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
             self.memory_velo = x.new_zeros(B, self.memory_len, 2)
+            self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
+            self.memory_class = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
@@ -335,6 +421,8 @@ class StreamPETRHead(AnchorFreeHead):
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
+            self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
+            self.memory_class = memory_refresh(self.memory_class[:, :self.memory_len], x)
         
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
@@ -349,13 +437,20 @@ class StreamPETRHead(AnchorFreeHead):
             rec_memory = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
             rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
+            rec_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
+            rec_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
+            rec_class = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
         else:
             rec_reference_points = all_bbox_preds[..., :3][-1]
             rec_velo = all_bbox_preds[..., -2:][-1]
             rec_memory = outs_dec[-1]
             rec_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
-        
+            rec_rot_sine = all_bbox_preds[..., 6:7]
+            rec_rot_cosine = all_bbox_preds[..., 7:8]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
+            rec_class = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
         # topk proposals
         _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=1)
         rec_timestamp = topk_gather(rec_timestamp, topk_indexes)
@@ -363,6 +458,8 @@ class StreamPETRHead(AnchorFreeHead):
         rec_memory = topk_gather(rec_memory, topk_indexes).detach()
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
         rec_velo = topk_gather(rec_velo, topk_indexes).detach()
+        rec_rotation = topk_gather(rec_rotation, topk_indexes).detach()
+        rec_class = topk_gather(rec_class, topk_indexes).detach()
 
         self.memory_embedding = torch.cat([rec_memory, self.memory_embedding], dim=1)
         self.memory_timestamp = torch.cat([rec_timestamp, self.memory_timestamp], dim=1)
@@ -372,6 +469,8 @@ class StreamPETRHead(AnchorFreeHead):
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
         self.memory_egopose = data['ego_pose'].unsqueeze(1) @ self.memory_egopose
+        self.memory_rotation = torch.cat([rec_rotation, self.memory_rotation], dim=1)
+        self.memory_class = torch.cat([rec_class, self.memory_class], dim=1)
 
     def position_embeding(self, data, memory_centers, topk_indexes, img_metas):
         eps = 1e-5
@@ -577,6 +676,8 @@ class StreamPETRHead(AnchorFreeHead):
                 head with normalized coordinate format (cx, cy, w, l, cz, h, theta, vx, vy). \
                 Shape [nb_dec, bs, num_query, 9].
         """
+        self.update_tracks(data)
+        self.update_forecasts()
         # zero init the memory bank
         self.pre_update_memory(data)
 
