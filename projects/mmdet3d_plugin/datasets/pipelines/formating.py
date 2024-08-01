@@ -111,3 +111,45 @@ class PETRFormatBundle3D(DefaultFormatBundle):
         repr_str += f'(class_names={self.class_names}, '
         repr_str += f'collect_keys={self.collect_keys}, with_gt={self.with_gt}, with_label={self.with_label})'
         return repr_str
+    
+@PIPELINES.register_module()
+class JDMPFormatBundle3D(PETRFormatBundle3D):
+    """Default formatting bundle.
+
+    It simplifies the pipeline of formatting common fields for voxels,
+    including "proposals", "gt_bboxes", "gt_labels", "gt_masks" and
+    "gt_semantic_seg".
+    These fields are formatted as follows.
+
+    - img: (1)transpose, (2)to tensor, (3)to DataContainer (stack=True)
+    - proposals: (1)to tensor, (2)to DataContainer
+    - gt_bboxes: (1)to tensor, (2)to DataContainer
+    - gt_bboxes_ignore: (1)to tensor, (2)to DataContainer
+    - gt_labels: (1)to tensor, (2)to DataContainer
+    """
+    def __init__(self, class_names, collect_keys, with_gt=True, with_label=True):
+        super(JDMPFormatBundle3D, self).__init__(class_names=class_names, collect_keys=collect_keys, with_gt=with_gt, with_label=with_label)
+    def __call__(self, results):
+        """Call function to transform and format common fields in results.
+
+        Args:
+            results (dict): Result dict contains the data to convert.
+
+        Returns:
+            dict: The result dict contains the data that is formatted with
+                default bundle.
+        """
+        if 'gt_instance_ids' in results:
+            if isinstance(results['gt_instance_ids'], list):
+                results['gt_instance_ids'] = DC([to_tensor(res) for res in results['gt_instance_ids']])
+            else:
+                results['gt_instance_ids'] = DC(to_tensor(results['gt_instance_ids']))
+        results = super(JDMPFormatBundle3D, self).__call__(results)
+        return results
+
+    def __repr__(self):
+        """str: Return a string that describes the module."""
+        repr_str = self.__class__.__name__
+        repr_str += f'(class_names={self.class_names}, '
+        repr_str += f'collect_keys={self.collect_keys}, with_gt={self.with_gt}, with_label={self.with_label})'
+        return repr_str

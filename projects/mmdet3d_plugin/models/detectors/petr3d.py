@@ -106,6 +106,7 @@ class Petr3D(MVXTwoStageDetector):
                             gt_labels_3d=None,
                             gt_bboxes=None,
                             gt_labels=None,
+                            gt_instance_ids=None,
                             img_metas=None,
                             centers2d=None,
                             depths=None,
@@ -129,7 +130,8 @@ class Petr3D(MVXTwoStageDetector):
                 return_losses = True
             loss = self.forward_pts_train(gt_bboxes_3d[i],
                                         gt_labels_3d[i], gt_bboxes[i],
-                                        gt_labels[i], img_metas[i], centers2d[i], depths[i], requires_grad=requires_grad,return_losses=return_losses,**data_t)
+                                        gt_labels[i], gt_instance_ids[i], img_metas[i], centers2d[i], depths[i], 
+                                        requires_grad=requires_grad,return_losses=return_losses,**data_t)
             if loss is not None:
                 for key, value in loss.items():
                     losses['frame_'+str(i)+"_"+key] = value
@@ -156,6 +158,7 @@ class Petr3D(MVXTwoStageDetector):
                           gt_labels_3d,
                           gt_bboxes,
                           gt_labels,
+                          gt_instance_ids,
                           img_metas,
                           centers2d,
                           depths,
@@ -189,7 +192,7 @@ class Petr3D(MVXTwoStageDetector):
             outs = self.pts_bbox_head(location, img_metas, topk_indexes, **data)
 
         if return_losses:
-            loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
+            loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_instance_ids, outs]
             losses = self.pts_bbox_head.loss(*loss_inputs)
             if self.with_img_roi_head:
                 loss2d_inputs = [gt_bboxes, gt_labels, centers2d, depths, outs_roi, img_metas]
@@ -212,7 +215,7 @@ class Petr3D(MVXTwoStageDetector):
         augmentations.
         """
         if return_loss:
-            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'img_metas']:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'img_metas', 'gt_instance_ids']:
                 data[key] = list(zip(*data[key]))
             return self.forward_train(**data)
         else:
@@ -225,6 +228,7 @@ class Petr3D(MVXTwoStageDetector):
                       gt_labels=None,
                       gt_bboxes=None,
                       gt_bboxes_ignore=None,
+                      gt_instance_ids=None,
                       depths=None,
                       centers2d=None,
                       **data):
@@ -272,7 +276,7 @@ class Petr3D(MVXTwoStageDetector):
 
         losses = self.obtain_history_memory(gt_bboxes_3d,
                         gt_labels_3d, gt_bboxes,
-                        gt_labels, img_metas, centers2d, depths, gt_bboxes_ignore, **data)
+                        gt_labels, gt_instance_ids, img_metas, centers2d, depths, gt_bboxes_ignore, **data)
 
         return losses
   

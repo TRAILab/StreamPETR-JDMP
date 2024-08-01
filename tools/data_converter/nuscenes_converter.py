@@ -270,6 +270,8 @@ def _fill_trainval_infos(nusc,
             info['gt_boxes'] = gt_boxes
             info['gt_names'] = names
             info['gt_velocity'] = velocity.reshape(-1, 2)
+            info['gt_instance_ids'] = np.array(
+                [nusc.getind('instance',anno['instance_token']) for anno in annotations])
             info['num_lidar_pts'] = np.array(
                 [a['num_lidar_pts'] for a in annotations])
             info['num_radar_pts'] = np.array(

@@ -89,7 +89,7 @@ model = dict(
             centers2d_cost=dict(type='BBox3DL1Cost', weight=10.0)))
         ),
     pts_bbox_head=dict(
-        type='StreamPETRHead',
+        type='JDMPPETRHead',
         num_classes=10,
         in_channels=256,
         num_query=300,
@@ -178,10 +178,10 @@ ida_aug_conf = {
     }
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_bbox=True,
-        with_label=True, with_bbox_depth=True),
-    dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='ObjectNameFilter', classes=class_names),
+    dict(type='JDMPLoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_bbox=True,
+        with_label=True, with_bbox_depth=True, with_inst_3d=True),
+    dict(type='JDMPObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='JDMPObjectNameFilter', classes=class_names),
     dict(type='ResizeCropFlipRotImage', data_aug_conf = ida_aug_conf, training=True),
     dict(type='GlobalRotScaleTransImage',
             rot_range=[-0.3925, 0.3925],
@@ -192,8 +192,8 @@ train_pipeline = [
             ),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='PETRFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
-    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists'] + collect_keys,
+    dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
+    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_instance_ids'] + collect_keys,
              meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d'))
 ]
 test_pipeline = [
