@@ -73,7 +73,8 @@ class JDMPPETRHead(AnchorFreeHead):
                  with_ego_pos=True,
                  match_with_velo=True,
                  match_costs=None,
-                 transformer=None,
+                 detect_transformer=None,
+                 forecast_transformer=None,
                  sync_cls_avg_factor=False,
                  code_weights=None,
                  bbox_coder=None,
@@ -184,7 +185,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.dn_weight = dn_weight
         self.split = split 
 
-        self.act_cfg = transformer.get('act_cfg',
+        self.act_cfg = detect_transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
         self.num_pred = 6
         self.normedlinear = normedlinear
@@ -199,7 +200,8 @@ class JDMPPETRHead(AnchorFreeHead):
         else:
             self.cls_out_channels = num_classes + 1
 
-        self.transformer = build_transformer(transformer)
+        self.detect_transformer = build_transformer(detect_transformer)
+        self.forecast_transformer = build_transformer(forecast_transformer)
 
         self.code_weights = nn.Parameter(torch.tensor(
             self.code_weights), requires_grad=False)
@@ -251,10 +253,19 @@ class JDMPPETRHead(AnchorFreeHead):
         reg_branch.append(Linear(self.embed_dims, self.code_size))
         reg_branch = nn.Sequential(*reg_branch)
 
+        forecast_reg_branch = []
+        for _ in range(self.num_reg_fcs):
+            forecast_reg_branch.append(Linear(self.embed_dims, self.embed_dims))
+            forecast_reg_branch.append(nn.ReLU())
+        forecast_reg_branch.append(Linear(self.embed_dims, 5))
+        forecast_reg_branch = nn.Sequential(*forecast_reg_branch)
+
         self.cls_branches = nn.ModuleList(
             [fc_cls for _ in range(self.num_pred)])
         self.reg_branches = nn.ModuleList(
             [reg_branch for _ in range(self.num_pred)])
+        self.forecast_reg_branches = nn.ModuleList(
+            [forecast_reg_branch for _ in range(self.num_pred)])
 
         self.position_encoder = nn.Sequential(
                 nn.Linear(self.position_dim, self.embed_dims*4),
@@ -302,7 +313,8 @@ class JDMPPETRHead(AnchorFreeHead):
             nn.init.uniform_(self.pseudo_reference_points.weight.data, 0, 1)
             self.pseudo_reference_points.weight.requires_grad = False
 
-        self.transformer.init_weights()
+        self.detect_transformer.init_weights()
+        self.forecast_transformer.init_weights()
         if self.loss_cls.use_sigmoid:
             bias_init = bias_init_with_prob(0.01)
             for m in self.cls_branches:
@@ -603,8 +615,7 @@ class JDMPPETRHead(AnchorFreeHead):
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = self.temporal_alignment(query_pos, tgt, reference_points)
 
         # transformer here is a little different from PETR
-        outs_dec, _ = self.transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
-
+        outs_dec, _ = self.detect_transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
         outs_dec = torch.nan_to_num(outs_dec)
         outputs_classes = []
         outputs_coords = []
@@ -628,6 +639,22 @@ class JDMPPETRHead(AnchorFreeHead):
         # update the memory bank
         self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
 
+        outs_forecast_dec = self.forecast_transformer(tgt, query_pos, attn_mask, temp_memory, temp_pos)
+        outs_forecast_dec = torch.nan_to_num(outs_forecast_dec)
+        outputs_forecast_coords = []
+        for lvl in range(outs_forecast_dec.shape[0]):
+            reference = inverse_sigmoid(reference_points.clone())
+            assert reference.shape[-1] == 3
+            tmp = self.forecast_reg_branches[lvl](outs_dec[lvl])
+
+            tmp[..., 0:3] += reference[..., 0:3]
+            tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
+
+            outputs_forecast_coord = tmp
+            outputs_forecast_coords.append(outputs_forecast_coord)
+        all_forecast_preds = torch.stack(outputs_forecast_coords)
+        all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
+
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
             output_known_coord = all_bbox_preds[:, :, :mask_dict['pad_size'], :]
@@ -646,6 +673,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict':None,
             }
+        outs['all_forecast_preds'] = all_forecast_preds
 
         return outs
     
