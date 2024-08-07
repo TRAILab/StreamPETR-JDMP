@@ -3,7 +3,7 @@
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=180gb                     # Job memory request
-#SBATCH --time=3-00:00:00               # Time limit hrs:min:sec
+#SBATCH --time=2-23:00:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=16
 #SBATCH --gres=gpu:t4:4
@@ -65,7 +65,9 @@ $BASE_CMD
 # echo "Debug mode: sleep engaged" && sleep 5d
 module load StdEnv/2020
 module load apptainer
-echo "[$((duration/3600))h$(((duration%3600)/60))m]: Running eval"
+duration=$SECONDS
+echo "[$((duration/3600))h$(((duration%3600)/60))m]: Running command"
 echo "$CONTAINER_CMD"
 eval $CONTAINER_CMD
-echo "[$((duration/3600))h$(((duration%3600)/60))m]: Done eval"
+duration=$SECONDS
+echo "[$((duration/3600))h$(((duration%3600)/60))m]: Done"
