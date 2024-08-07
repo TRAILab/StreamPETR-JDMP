@@ -198,3 +198,12 @@ def transform_reference_points(reference_points, egopose, reverse=False, transla
         matrix[..., :3, 3] = 0.0
     reference_points = (matrix.unsqueeze(1) @ reference_points.unsqueeze(-1)).squeeze(-1)[..., :3]
     return reference_points
+
+
+def transform_velocity(velocity, egopose):
+    velocity = torch.cat([velocity, torch.zeros_like(velocity[..., 0:1]), 
+                          torch.ones_like(velocity[..., 0:1])], dim=-1)
+    matrix = egopose
+    matrix[..., :3, 3] = 0.0
+    velocity = (matrix.unsqueeze(1) @ velocity.unsqueeze(-1)).squeeze(-1)[..., :2]
+    return velocity

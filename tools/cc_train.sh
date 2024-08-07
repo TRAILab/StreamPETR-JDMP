@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmp_baseline_bs4_4gpu    # Job name
+#SBATCH --job-name=train_jdmp_vel_transform_bs4_4gpu    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request

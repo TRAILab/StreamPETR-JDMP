@@ -25,7 +25,7 @@ from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
-from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear
+from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, transform_velocity, memory_refresh, SELayer_Linear
 
 @HEADS.register_module()
 class StreamPETRHead(AnchorFreeHead):
@@ -334,6 +334,7 @@ class StreamPETRHead(AnchorFreeHead):
             self.memory_reference_point = memory_refresh(self.memory_reference_point[:, :self.memory_len], x)
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
+            self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose_inv'])
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
         
         # for the first frame, padding pseudo_reference_points (non-learnable)
@@ -369,6 +370,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
         self.memory_reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
         self.memory_velo = torch.cat([rec_velo, self.memory_velo], dim=1)
+        self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose'])
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
         self.memory_egopose = data['ego_pose'].unsqueeze(1) @ self.memory_egopose
