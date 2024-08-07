@@ -30,7 +30,7 @@ class_names = [
 ]
 
 num_gpus = 1
-batch_size = 8
+batch_size = 16
 num_iters_per_epoch = 28130 // (num_gpus * batch_size)
 num_epochs = 60
 
@@ -244,7 +244,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW', 
-    lr=2e-4, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
