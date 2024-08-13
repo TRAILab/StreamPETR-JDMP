@@ -54,7 +54,7 @@ class JDMPLoadAnnotations3D(LoadAnnotations3D):
                  with_mask=False,
                  with_seg=False,
                  with_bbox_depth=False,
-                 with_inst_3d=False,
+                 with_forecast=False,
                  poly2mask=True,
                  seg_3d_dtype=np.int64,
                  file_client_args=dict(backend='disk')):
@@ -79,7 +79,7 @@ class JDMPLoadAnnotations3D(LoadAnnotations3D):
         self.with_mask_3d = with_mask_3d
         self.with_seg_3d = with_seg_3d
         self.seg_3d_dtype = seg_3d_dtype
-        self.with_inst_3d = with_inst_3d
+        self.with_forecast = with_forecast
 
 
     def __call__(self, results):
@@ -93,8 +93,9 @@ class JDMPLoadAnnotations3D(LoadAnnotations3D):
                 semantic segmentation annotations.
         """
         results = super().__call__(results)
-        if self.with_inst_3d:
-            results['gt_instance_ids'] = results['ann_info']['gt_instance_ids']
+        if self.with_forecast:
+            for key in ['gt_instance_ids', 'gt_forecasting_locs', 'gt_forecasting_masks']:
+                results[key] = results['ann_info'][key]
 
         return results
 

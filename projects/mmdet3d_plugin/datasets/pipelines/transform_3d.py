@@ -416,22 +416,18 @@ class JDMPObjectRangeFilter(object):
             bev_range = self.pcd_range[[0, 2, 3, 5]]
 
         gt_bboxes_3d = input_dict['gt_bboxes_3d']
-        gt_labels_3d = input_dict['gt_labels_3d']
-        gt_instance_ids = input_dict['gt_instance_ids']
         mask = gt_bboxes_3d.in_range_bev(bev_range)
         gt_bboxes_3d = gt_bboxes_3d[mask]
+        # limit rad to [-pi, pi]
+        gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
+        input_dict['gt_bboxes_3d'] = gt_bboxes_3d
         # mask is a torch tensor but gt_labels_3d is still numpy array
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        gt_labels_3d = gt_labels_3d[mask.numpy().astype(np.bool)]
-        gt_instance_ids = gt_instance_ids[mask.numpy().astype(np.bool)]
-
-        # limit rad to [-pi, pi]
-        gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
-        input_dict['gt_bboxes_3d'] = gt_bboxes_3d
-        input_dict['gt_labels_3d'] = gt_labels_3d
-        input_dict['gt_instance_ids'] = gt_instance_ids
+        for key in ['gt_labels_3d', 'gt_instance_ids', 
+                    'gt_forecasting_locs', 'gt_forecasting_masks']:
+            input_dict[key] = input_dict[key][mask.numpy().astype(np.bool)]
 
         return input_dict
 
@@ -467,9 +463,9 @@ class JDMPObjectNameFilter(object):
         gt_labels_3d = input_dict['gt_labels_3d']
         gt_bboxes_mask = np.array([n in self.labels for n in gt_labels_3d],
                                   dtype=np.bool_)
-        input_dict['gt_bboxes_3d'] = input_dict['gt_bboxes_3d'][gt_bboxes_mask]
-        input_dict['gt_labels_3d'] = input_dict['gt_labels_3d'][gt_bboxes_mask]
-        input_dict['gt_instance_ids'] = input_dict['gt_instance_ids'][gt_bboxes_mask]
+        for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_instance_ids',
+                    'gt_forecasting_locs', 'gt_forecasting_masks']:
+            input_dict[key] = input_dict[key][gt_bboxes_mask]
 
         return input_dict
 

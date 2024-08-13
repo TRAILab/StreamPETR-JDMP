@@ -106,7 +106,8 @@ class Petr3D(MVXTwoStageDetector):
                             gt_labels_3d=None,
                             gt_bboxes=None,
                             gt_labels=None,
-                            gt_instance_ids=None,
+                            gt_forecasting_locs=None,
+                            gt_forecasting_masks=None,
                             img_metas=None,
                             centers2d=None,
                             depths=None,
@@ -128,10 +129,10 @@ class Petr3D(MVXTwoStageDetector):
                 requires_grad = True
             if i >= num_grad_losses:
                 return_losses = True
-            loss = self.forward_pts_train(gt_bboxes_3d[i],
-                                        gt_labels_3d[i], gt_bboxes[i],
-                                        gt_labels[i], gt_instance_ids[i], img_metas[i], centers2d[i], depths[i], 
-                                        requires_grad=requires_grad,return_losses=return_losses,**data_t)
+            loss = self.forward_pts_train(gt_bboxes_3d[i], gt_labels_3d[i], gt_bboxes[i],
+                                        gt_labels[i], gt_forecasting_locs[i], gt_forecasting_masks[i], 
+                                        img_metas[i], centers2d[i], depths[i], 
+                                        requires_grad=requires_grad, return_losses=return_losses, **data_t)
             if loss is not None:
                 for key, value in loss.items():
                     losses['frame_'+str(i)+"_"+key] = value
@@ -158,7 +159,8 @@ class Petr3D(MVXTwoStageDetector):
                           gt_labels_3d,
                           gt_bboxes,
                           gt_labels,
-                          gt_instance_ids,
+                          gt_forecasting_locs,
+                          gt_forecasting_masks,
                           img_metas,
                           centers2d,
                           depths,
@@ -192,7 +194,7 @@ class Petr3D(MVXTwoStageDetector):
             outs = self.pts_bbox_head(location, img_metas, topk_indexes, **data)
 
         if return_losses:
-            loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_instance_ids, outs]
+            loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_forecasting_locs, gt_forecasting_masks, outs]
             losses = self.pts_bbox_head.loss(*loss_inputs)
             if self.with_img_roi_head:
                 loss2d_inputs = [gt_bboxes, gt_labels, centers2d, depths, outs_roi, img_metas]
@@ -215,7 +217,9 @@ class Petr3D(MVXTwoStageDetector):
         augmentations.
         """
         if return_loss:
-            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'img_metas', 'gt_instance_ids']:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 
+                        'centers2d', 'depths', 'img_metas',
+                        'gt_forecasting_locs', 'gt_forecasting_masks']:
                 data[key] = list(zip(*data[key]))
             return self.forward_train(**data)
         else:
@@ -228,7 +232,8 @@ class Petr3D(MVXTwoStageDetector):
                       gt_labels=None,
                       gt_bboxes=None,
                       gt_bboxes_ignore=None,
-                      gt_instance_ids=None,
+                      gt_forecasting_locs=None,
+                      gt_forecasting_masks=None,
                       depths=None,
                       centers2d=None,
                       **data):
@@ -274,9 +279,9 @@ class Petr3D(MVXTwoStageDetector):
         else:
             data['img_feats'] = rec_img_feats
 
-        losses = self.obtain_history_memory(gt_bboxes_3d,
-                        gt_labels_3d, gt_bboxes,
-                        gt_labels, gt_instance_ids, img_metas, centers2d, depths, gt_bboxes_ignore, **data)
+        losses = self.obtain_history_memory(gt_bboxes_3d, gt_labels_3d, gt_bboxes, gt_labels, 
+                                            gt_forecasting_locs, gt_forecasting_masks, 
+                                            img_metas, centers2d, depths, gt_bboxes_ignore, **data)
 
         return losses
   

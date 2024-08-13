@@ -139,11 +139,12 @@ class JDMPFormatBundle3D(PETRFormatBundle3D):
             dict: The result dict contains the data that is formatted with
                 default bundle.
         """
-        if 'gt_instance_ids' in results:
-            if isinstance(results['gt_instance_ids'], list):
-                results['gt_instance_ids'] = DC([to_tensor(res) for res in results['gt_instance_ids']])
-            else:
-                results['gt_instance_ids'] = DC(to_tensor(results['gt_instance_ids']))
+        for key in ['gt_instance_ids', 'gt_forecasting_locs', 'gt_forecasting_masks']:
+            if key in results:
+                if isinstance(results[key], list):
+                    results[key] = DC([to_tensor(res) for res in results[key]])
+                else:
+                    results[key] = DC(to_tensor(results[key]))
         results = super(JDMPFormatBundle3D, self).__call__(results)
         return results
 

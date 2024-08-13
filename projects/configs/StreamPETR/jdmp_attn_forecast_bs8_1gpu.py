@@ -6,11 +6,11 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
-        dict(type='MMDetWandbHook',
+        dict(type='WandbLoggerHook',
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='stream_petr_r50_flash_704_bs8_seq_428q_nui_60e_1gpu'),
+                name='jdmp_attn_forecast_bs8_1gpu',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -167,6 +167,7 @@ model = dict(
             alpha=0.25,
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -200,7 +201,7 @@ ida_aug_conf = {
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
     dict(type='JDMPLoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_bbox=True,
-        with_label=True, with_bbox_depth=True, with_inst_3d=True),
+        with_label=True, with_bbox_depth=True, with_forecast=True),
     dict(type='JDMPObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='JDMPObjectNameFilter', classes=class_names),
     dict(type='ResizeCropFlipRotImage', data_aug_conf = ida_aug_conf, training=True),
@@ -214,7 +215,7 @@ train_pipeline = [
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
-    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_instance_ids'] + collect_keys,
+    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_instance_ids', 'gt_forecasting_locs', 'gt_forecasting_masks'] + collect_keys,
              meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d'))
 ]
 test_pipeline = [
