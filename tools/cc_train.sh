@@ -3,7 +3,7 @@
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
-#SBATCH --time=2-23:00:00               # Time limit hrs:min:sec
+#SBATCH --time=2:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
 #SBATCH --gres=gpu:t4:4           # gpu:t4:4 (graham) or gpu:a100:1 (narval)
@@ -12,6 +12,7 @@
 
 # Parameters
 SERVER=graham
+DATASET=nuscenes_mini
 NUM_GPUS=4
 CFG_NAME=streampetr_jdmp_forecast_cv
 
@@ -58,16 +59,33 @@ NUM_GPUS=$NUM_GPUS
 "
 # Extract dataset
 echo "Extracting data"
-for file in $DATA_DIR/*.zip; do
+if [ "$DATASET" = "nuscenes_mini" ]; then
+    mkdir $TMP_DATA_DIR
     duration=$SECONDS
+    file=$DATA_DIR/v1.0-mini.tgz
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
-    unzip -qq $file -d $TMP_DATA_DIR
-done
-for file in $DATA_PKL_DIR/*.pkl; do
+    tar -xf $file -C $TMP_DATA_DIR
     duration=$SECONDS
+    file=$DATA_PKL_DIR/nuscenes2d_mini_temporal_infos_train.pkl
     echo "[$((duration/3600))h$(((duration%3600)/60))m]: Copying $file to $TMP_DATA_DIR"
     cp $file $TMP_DATA_DIR
-done
+    duration=$SECONDS
+    file=$DATA_PKL_DIR/nuscenes2d_mini_temporal_infos_val.pkl
+    echo "[$((duration/3600))h$(((duration%3600)/60))m]: Copying $file to $TMP_DATA_DIR"
+    cp $file $TMP_DATA_DIR
+fi
+if [ "$DATASET" = "nuscenes" ]; then
+    for file in $DATA_DIR/*.zip; do
+        duration=$SECONDS
+        echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
+        unzip -qq $file -d $TMP_DATA_DIR
+    done
+    for file in $DATA_PKL_DIR/*.pkl; do
+        duration=$SECONDS
+        echo "[$((duration/3600))h$(((duration%3600)/60))m]: Copying $file to $TMP_DATA_DIR"
+        cp $file $TMP_DATA_DIR
+    done
+fi
 echo "Done extracting data"
 
 # Run command
