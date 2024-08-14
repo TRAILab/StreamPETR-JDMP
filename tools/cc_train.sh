@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmp_baseline_bs4_4gpu    # Job name
+#SBATCH --job-name=train_streampetr_jdmp_forecast_cv    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
@@ -13,7 +13,7 @@
 # Parameters
 SERVER=graham
 NUM_GPUS=4
-CFG_NAME=jdmp_baseline_bs4_4gpu
+CFG_NAME=streampetr_jdmp_forecast_cv
 
 # Host paths
 HOME_DIR=/home/spapais
