@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_baseline_bs16_1gpu'),
+                name='jdmp_mini_baseline_bs4_4gpu'),
             interval=55)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -29,8 +29,8 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
-num_gpus = 1
-batch_size = 16
+num_gpus = 4
+batch_size = 4
 num_iters_per_epoch = 323 // (num_gpus * batch_size)
 num_epochs = 60
 
