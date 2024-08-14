@@ -420,7 +420,8 @@ class StreamPETRHead(AnchorFreeHead):
     def temporal_alignment(self, query_pos, tgt, reference_points):
         B = query_pos.size(0)
 
-        temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        prop_mem_ref_point = self.memory_reference_point + torch.nn.functional.pad(self.memory_velo, (0,1)) * self.memory_timestamp.float()
+        temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
