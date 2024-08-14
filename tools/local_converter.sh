@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 
 # Parameters
-GPUS=0
-NUM_GPUS=1
-CONFIG_NAME=jdmp_baseline_bs16_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
@@ -11,12 +8,6 @@ HOME_DIR=/home/trail/workspace
 PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 DATA_DIR=/data/sets/nuscenes
 OUTPUT_DIR=$PROJ_DIR/output
-
-# Container paths
-CONFIG_DIR=/proj/projects/configs/StreamPETR
-CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
-MODEL_CKPT=/proj/output/$CONFIG_NAME/$CONFIG_NAME.pth
-WRK_DIR=/proj/output/$CONFIG_NAME
 
 VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/samples:/proj/data/nuscenes/samples
@@ -28,10 +19,10 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/sweeps:/proj/data/nuscenes/sweeps
 -v $OUTPUT_DIR:/proj/output/"
 
-BASE_CMD="tools/dist_train.sh $CONFIG_FILE $NUM_GPUS --work-dir $WRK_DIR"
+BASE_CMD="python tools/create_data_nusc.py --root-path /proj/data/nuscenes --extra-tag nuscenes2d --version v1.0"
+# BASE_CMD="python tools/create_data_nusc.py --root-path /proj/data/nuscenes --extra-tag nuscenes2d_mini --version v1.0-mini"
 
-CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
---env="WANDB_API_KEY=$WANDB_API_KEY"
+CONTAINER_CMD="docker run -it --ipc host -w /proj/
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"
