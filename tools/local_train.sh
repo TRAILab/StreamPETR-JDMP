@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_baseline_bs16_1gpu
+CONFIG_NAME=jdmp_mini_baseline_bs16_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
