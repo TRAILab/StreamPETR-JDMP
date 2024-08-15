@@ -2,4 +2,5 @@ __pycache__/
 ckpts/
 data/
 output/
+output_home
 wandb/
