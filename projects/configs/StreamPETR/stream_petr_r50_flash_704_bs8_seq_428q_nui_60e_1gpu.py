@@ -3,15 +3,15 @@ _base_ = [
     '../../../mmdetection3d/configs/_base_/default_runtime.py'
 ]
 log_config = dict(
-    interval=50,
+    interval=55,
     hooks=[
         dict(type='TextLoggerHook'),
-        dict(type='MMDetWandbHook',
+        dict(type='WandbLoggerHook',
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='stream_petr_r50_flash_704_bs8_seq_428q_nui_60e_1gpu'),
-            interval=50)
+                name='jdmp_mini_baseline_bs16_1gpu'),
+            interval=55)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
@@ -30,8 +30,8 @@ class_names = [
 ]
 
 num_gpus = 1
-batch_size = 8
-num_iters_per_epoch = 28130 // (num_gpus * batch_size)
+batch_size = 16
+num_iters_per_epoch = 323 // (num_gpus * batch_size)
 num_epochs = 60
 
 queue_length = 1
@@ -89,7 +89,7 @@ model = dict(
             centers2d_cost=dict(type='BBox3DL1Cost', weight=10.0)))
         ),
     pts_bbox_head=dict(
-        type='JDMPPETRHead',
+        type='StreamPETRHead',
         num_classes=10,
         in_channels=256,
         num_query=300,
@@ -178,10 +178,10 @@ ida_aug_conf = {
     }
 train_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-    dict(type='JDMPLoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_bbox=True,
-        with_label=True, with_bbox_depth=True, with_inst_3d=True),
-    dict(type='JDMPObjectRangeFilter', point_cloud_range=point_cloud_range),
-    dict(type='JDMPObjectNameFilter', classes=class_names),
+    dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_bbox=True,
+        with_label=True, with_bbox_depth=True),
+    dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
+    dict(type='ObjectNameFilter', classes=class_names),
     dict(type='ResizeCropFlipRotImage', data_aug_conf = ida_aug_conf, training=True),
     dict(type='GlobalRotScaleTransImage',
             rot_range=[-0.3925, 0.3925],
@@ -192,8 +192,8 @@ train_pipeline = [
             ),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
-    dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
-    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_instance_ids'] + collect_keys,
+    dict(type='PETRFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
+    dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists'] + collect_keys,
              meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d'))
 ]
 test_pipeline = [
@@ -223,7 +223,7 @@ data = dict(
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'nuscenes2d_temporal_infos_train.pkl',
+        ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl',
         num_frame_losses=num_frame_losses,
         seq_split_num=2, # streaming video training
         seq_mode=True, # streaming video training
@@ -236,15 +236,15 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
 
 optimizer = dict(
     type='AdamW', 
-    lr=2e-4, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
