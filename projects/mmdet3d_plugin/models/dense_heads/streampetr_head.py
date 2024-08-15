@@ -11,6 +11,10 @@
 # ------------------------------------------------------------------------
 import torch
 import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+
+import math
 from mmcv.cnn import Linear, bias_init_with_prob
 
 from mmcv.runner import force_fp32
@@ -26,6 +30,9 @@ from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
 from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear
+
+from projects.mmdet3d_plugin.traj_predictor import TrajectoryPredictor
+from projects.mmdet3d_plugin.forecast_utils.forecast_helper import get_target_agent_history_states, get_surrounding_agent_history_states, convert_double_to_float, convert_to_torch_and_expand, send_to_device
 
 @HEADS.register_module()
 class StreamPETRHead(AnchorFreeHead):
@@ -229,6 +236,23 @@ class StreamPETRHead(AnchorFreeHead):
 
         self._init_layers()
         self.reset_memory()
+        
+        self.pgp_propagator = TrajectoryPredictor(
+            nusc_dataroot='/home/robert/Desktop/datasets/nuScenes',
+            config_path='/home/robert/Desktop/trail/PGP/configs/pgp_gatx2_lvm_traversal.yml',
+            checkpoint_path='/home/robert/Desktop/trail/PGP/PGP_lr-scheduler.tar',
+            stats_path='/home/robert/Desktop/trail/PGP/data/',
+            history_length=2,
+            traversal_horizon=15,
+        )
+        self.class_names = [
+            'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+            'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+        ]
+        self.vehicles = [0., 1., 2., 3., 4., 6., 7.]
+        self.pedestrians = [8.]
+        self.cv_pgp_deviations = []
+        self.pgp_to_cv_threshold = 30.0
 
     def _init_layers(self):
         """Initialize layers of the transformer head."""
@@ -396,8 +420,259 @@ class StreamPETRHead(AnchorFreeHead):
         return
 
 
-    def update_forecasts(self):
-        pass # TODO: implement this
+    def get_valid_agent_indices(self, B):
+        '''
+        Step 1: Find all valid queries to propagate. A valid agent:
+        1. Is of class vehicle / pedestrian
+        2. Non zero history states for 6 frames
+        3. Non zero timestamps meaning the agent is active
+        4. Non zero velocity
+        ''' 
+        valid_agent_indices, vehicle_agent_indeces, pedestrian_agent_indices = torch.zeros(B, self.memory_len), torch.zeros(B, self.memory_len), torch.zeros(B, self.memory_len)
+        for b in range(B):
+            for i in range(self.memory_len):
+                is_valid_class =  self.track_class[b, i, -1, 0] in self.vehicles + self.pedestrians
+                non_zero_history_states = torch.count_nonzero(self.track_position[b, i, :, 0]) == 6
+                non_zero_timestamp = self.track_timestamp[b, i, 0] != 0
+                non_zero_velocity = torch.count_nonzero(self.track_velocity[b, i, :, 0]) >= 2 and torch.count_nonzero(self.track_velocity[b, i, :, 1]) >= 2
+                valid_agent_indices[b, i] = is_valid_class and non_zero_history_states and non_zero_timestamp and non_zero_velocity
+                vehicle_agent_indeces[b, i] = self.track_class[b, i, -1, 0] in self.vehicles and non_zero_history_states and non_zero_timestamp and non_zero_velocity
+                pedestrian_agent_indices[b, i] = self.track_class[b, i, -1, 0] in self.pedestrians and non_zero_history_states and non_zero_timestamp and non_zero_velocity
+                # print(f'{is_valid_class}, {non_zero_history_states}, {non_zero_timestamp}, {non_zero_velocity}')
+        return valid_agent_indices, vehicle_agent_indeces, pedestrian_agent_indices
+
+    def kinematic_feasibility_check(self, trajectory, 
+                                max_acceleration_threshold=2.0, 
+                                max_yaw_rate_threshold=0.5, 
+                                max_jerk_threshold=1.0):
+        """
+        Check if the last 12 points of a trajectory are kinematically feasible.
+        If not, replace them with a constant velocity model.
+
+        Parameters:
+        - trajectory: np.ndarray, shape (17, 2)
+            The 17x2 trajectory where the first 5 elements are history states and the last 12 are future predictions.
+        - max_acceleration_threshold: float
+            The maximum allowable acceleration (m/s^2).
+        - max_yaw_rate_threshold: float
+            The maximum allowable yaw rate (rad/s).
+        - max_jerk_threshold: float
+            The maximum allowable jerk (m/s^3).
+
+        Returns:
+        - np.ndarray, shape (17, 2)
+            The modified trajectory if it was kinematically infeasible.
+        """
+        
+        def compute_yaw(p1, p2):
+            return np.arctan2(p2[1] - p1[1], p2[0] - p1[0])
+
+        # Calculate velocities between consecutive points in the future predictions
+        velocities = np.diff(trajectory[4:], axis=0)
+
+        # Calculate accelerations between consecutive velocities
+        accelerations = np.diff(velocities, axis=0)
+
+        # Calculate the magnitudes of the accelerations
+        acceleration_magnitudes = np.linalg.norm(accelerations, axis=1)
+
+        # Calculate yaw rates between consecutive points
+        yaw_rates = []
+        for i in range(5, 16):
+            yaw1 = compute_yaw(trajectory[i-1], trajectory[i])
+            yaw2 = compute_yaw(trajectory[i], trajectory[i+1])
+            yaw_rate = (yaw2 - yaw1) / (1.0)  # Assuming time step of 1.0 second
+            yaw_rates.append(yaw_rate)
+
+        yaw_rates = np.array(yaw_rates)
+
+        # Calculate jerk (rate of change of acceleration)
+        jerks = np.diff(acceleration_magnitudes)
+
+        # Check if any acceleration, yaw rate, or jerk exceeds the threshold
+        if (np.any(acceleration_magnitudes > max_acceleration_threshold) or
+            np.any(np.abs(yaw_rates) > max_yaw_rate_threshold) or
+            np.any(np.abs(jerks) > max_jerk_threshold)):
+            
+            # Replace future trajectory with constant velocity model
+            last_known_velocity = trajectory[4] - trajectory[3]
+            
+            for i in range(5, 17):
+                trajectory[i] = trajectory[i-1] + last_known_velocity
+
+        return trajectory
+
+    def predict_trajectory(self, history_states, time_step=0.5):
+        """
+        Predict a 17x2 trajectory based on the provided history states.
+
+        Parameters:
+        - history_states: np.ndarray, shape (5, 5)
+            The 5x5 array where each row is [x, y, velocity, acceleration, yaw rate].
+            The last row represents the current state.
+        - time_step: float
+            The time step between each prediction.
+
+        Returns:
+        - np.ndarray, shape (17, 2)
+            The 17x2 trajectory where the first 5 rows are the history states' (x, y) locations,
+            and the last 12 rows are predicted future (x, y) locations.
+        """
+        
+        # Initialize the trajectory with the first 5 history (x, y) locations
+        trajectory = np.zeros((17, 2))
+        trajectory[:5, 0] = history_states[:, 0]  # x values
+        trajectory[:5, 1] = history_states[:, 1]  # y values
+        
+        # Get the current state (last row of history_states)
+        current_x, current_y, current_velocity, current_acceleration, current_yaw_rate = history_states[-1]
+
+        # Predict the next 12 states
+        for i in range(5, 17):
+            # Update velocity and yaw rate
+            current_velocity += current_acceleration * time_step
+            current_yaw_rate = history_states[-1, 4]  # Assuming constant yaw rate
+            
+            # Update position based on the updated velocity and yaw rate
+            delta_x = current_velocity * np.cos(current_yaw_rate) * time_step
+            delta_y = current_velocity * np.sin(current_yaw_rate) * time_step
+            
+            current_x += delta_x
+            current_y += delta_y
+            
+            # Store the predicted (x, y) location
+            trajectory[i] = [current_x, current_y]
+        
+        return trajectory
+
+    def update_forecasts(self, data, sample_indices):
+        # Originall, the expected input format is two dictionaries, one for the histoy of tracked objects
+        # and the other one is for the objects that are active in the current frame
+        # tracked_objects = {id: a list of track history, the last element is the most recent one}
+        # outputs = [tracks at the current timestamp]
+        
+        # 1. What classes do we need to propagate?
+        # 2. How should we organize the output of the trajectory prediction model?
+        # 3. (For later) Should we unfreeze the model weights of the propagation model?
+        
+        # self.track_position: [B, 1024, 6, 3]
+        # self.track_velocity: [B, 1024, 6, 2]
+        # self.track_timestamp: [B, 1024, 1]
+        # self.track_rotation: [B, 1024, 6, 1]
+        # self.track_class: [B, 1024, 6, 1]
+        # print('\n========== Updating Forecasts ==========\n')
+        if self.track_position is None:
+            # print('No tracks to propagate')
+            return
+        B = self.track_position.size(0)
+        M = self.memory_len
+        # print('Number of tracks to propagate: ', M)
+        valid_agent_indices, vehicle_agent_indeces, pedestrian_agent_indices= self.get_valid_agent_indices(B)
+        # print(f'Number of valid agents: {torch.sum(valid_agent_indices)}')
+        # print(f'Number of vehicle agents: {torch.sum(vehicle_agent_indeces)}')
+        # print(f'Number of pedestrian agents: {torch.sum(pedestrian_agent_indices)}')
+        propagated_trajectories = torch.zeros(B, M, 12, 2)
+        
+        for b in range(B):
+            for m in range(M):
+                sample_idx = sample_indices[b]
+                if not valid_agent_indices[b, m]:
+                    target_agent_position, target_agent_vel, target_agent_rotation = self.track_position[b, m], self.track_velocity[b, m], self.track_rotation[b, m]
+                    target_agent_global_pose = [target_agent_position[-1][0].item(), target_agent_position[-1][1].item(), target_agent_rotation[-1].item()]
+                    target_agent_history_states = get_target_agent_history_states(target_agent_position, target_agent_vel, target_agent_rotation)
+                    constant_velocity_trajectory = self.predict_trajectory(target_agent_history_states, time_step=0.5)[5:, ...]
+                    constant_velocity_trajectory += np.array(target_agent_global_pose[:2])
+                    propagated_trajectories[b, m] = torch.from_numpy(constant_velocity_trajectory)
+                else:
+                    try:
+                        target_agent_position, target_agent_vel, target_agent_rotation = self.track_position[b, m], self.track_velocity[b, m], self.track_rotation[b, m]
+                        target_agent_global_pose = [target_agent_position[-1][0].item(), target_agent_position[-1][1].item(), target_agent_rotation[-1].item()]
+                        target_agent_history_states = get_target_agent_history_states(target_agent_position, target_agent_vel, target_agent_rotation)
+                        surrounding_agent_representation = get_surrounding_agent_history_states(m, valid_agent_indices[b], vehicle_agent_indeces[b], pedestrian_agent_indices[b], target_agent_global_pose, 
+                                                                                                self.track_position[b], self.track_velocity[b], self.track_rotation[b], self.track_class[b])
+                        map_representation = self.pgp_propagator.get_map_representation(target_agent_global_pose, sample_idx)
+                        init_node = self.pgp_propagator.get_initial_node(map_representation)
+                        propagator_input = {}
+                        propagator_input['inputs'] = {
+                            'target_agent_representation': target_agent_history_states,
+                            'map_representation': map_representation,
+                            'surrounding_agent_representation': surrounding_agent_representation,
+                            'init_node': init_node,
+                        }
+                        propagator_input['inputs']['agent_node_masks'] = self.pgp_propagator.get_agent_node_masks(map_representation, surrounding_agent_representation)
+                        propagator_input = convert_to_torch_and_expand(propagator_input)
+                        propagator_input = send_to_device(convert_double_to_float(propagator_input))
+                        pred_trajectories = self.pgp_propagator.model(propagator_input['inputs'])
+                        
+                        # Visualize the propagated trajectories
+                        trajectories = pred_trajectories['traj'].detach().cpu().numpy()[0]
+                        probs = pred_trajectories['probs'].detach().cpu().numpy()[0]
+                        max_prob_index = np.argmax(probs)
+                        best_trajectory = trajectories[max_prob_index]
+                        best_trajectory += np.array(target_agent_global_pose[:2])
+                        target_agent_history_global = target_agent_history_states[..., :2]+ np.array(target_agent_global_pose[:2])
+                        best_trajectory = np.concatenate([target_agent_history_global, best_trajectory], axis=0)
+                        best_trajectory = self.kinematic_feasibility_check(best_trajectory)
+                        propagated_trajectories[b, m] = torch.from_numpy(best_trajectory)[5:, ...]
+                        # Set up the map for visualization
+                        fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 10))
+                        target_agent_global_states = []
+                        for i in range(1, target_agent_position.shape[0]):
+                            global_states = [target_agent_position[i][0].item(), target_agent_position[i][1].item(), target_agent_rotation[i].item()]
+                            target_agent_global_states.append(global_states)
+                        
+                        # Step 1: Subtract the two tensors
+                        cv_trajectory = self.predict_trajectory(target_agent_history_states, time_step=0.5)[5:, ...]
+                        cv_trajectory += np.array(target_agent_global_pose[:2])
+                        cv_trajectory = torch.from_numpy(cv_trajectory)
+                        difference =  torch.from_numpy(best_trajectory)[5:, ...] - cv_trajectory
+                        squared_difference = difference ** 2
+                        sum_squared_difference = squared_difference.sum(dim=1)
+                        euclidean_distance = torch.sqrt(sum_squared_difference)
+                        total_deviation = torch.sum(euclidean_distance).item()
+                        if total_deviation > self.pgp_to_cv_threshold:
+                            best_trajectory = cv_trajectory
+                            propagated_trajectories[b, m] = best_trajectory
+                            # self.pgp_propagator.visualize_map_with_target_agent(best_trajectory, ax, target_agent_global_states, plot_all_map_attributes=False, radius=50, name=total_deviation)
+                        
+                        # print(f'\nEuclidean distance between the two trajectories: {total_deviation}')
+                        # print(f'Predicted trajectory: {best_trajectory}')
+                        # print(f'CV trajectory: {cv_trajectory}\n')
+                        self.cv_pgp_deviations.append(total_deviation)
+                        # if len(self.cv_pgp_deviations) % 100 == 0:
+                        #     deviations = sorted(self.cv_pgp_deviations)
+                        #     x_indices = range(len(deviations))
+                        #     plt.bar(x_indices, deviations)
+                        #     plt.xlabel('Index')
+                        #     plt.ylabel('Deviation (m)')
+                        #     plt.title('Deviations of each PGP propageted agent compared to constant velocity model')
+                        #     plt.savefig(f'bar_{len(self.cv_pgp_deviations)}.png')
+                        #     print('Saved propagation stats')
+                    # print(self.cv_pgp_deviations)
+                    # breakpoint()
+                    except:
+                        target_agent_position, target_agent_vel, target_agent_rotation = self.track_position[b, m], self.track_velocity[b, m], self.track_rotation[b, m]
+                        target_agent_global_pose = [target_agent_position[-1][0].item(), target_agent_position[-1][1].item(), target_agent_rotation[-1].item()]
+                        target_agent_history_states = get_target_agent_history_states(target_agent_position, target_agent_vel, target_agent_rotation)
+                        constant_velocity_trajectory = self.predict_trajectory(target_agent_history_states, time_step=0.5)[5:, ...]
+                        constant_velocity_trajectory += np.array(target_agent_global_pose[:2])
+                        propagated_trajectories[b, m] = torch.from_numpy(constant_velocity_trajectory)
+
+        # self.propagated_trajectories: [B, 1024, 12, 2]
+        # Since self.track_position and all other things have a history of 6 frames, we need to wait for the history
+        # to be full to start propagating
+        
+        # Target agent history states should be of shape: [B, 1024, 1, 5, 5]
+        # Surrounding agent pedestrian history states should be of shape: [B, 1024, 77, 5, 5]
+        # Surrounding agent pedestrian mask history states should be of shape: [B, 1024, 77, 5, 5]
+        # Surrounding agent vehicle mask history states should be of shape: [B, 1024, 84, 5, 5]
+        # Surrounding agentvehicle mask history states should be of shape: [B, 1024, 84, 5, 5]
+        
+        # Ouput of the trajectory prediction model should be of shape: [B, 1024, 12, 2] where 12 is the number of predictions 
+        # and 2 is for x, y loication in the agent centric frame
+        
+        self.propagated_trajectories = propagated_trajectories
+        # print('\n========== Finished Forecasts ==========\n')
 
 
     def pre_update_memory(self, data):
@@ -424,6 +699,15 @@ class StreamPETRHead(AnchorFreeHead):
             self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
             self.memory_class = memory_refresh(self.memory_class[:, :self.memory_len], x)
         
+        '''
+        Shapes: 
+        memory_timestamp: [1, 512, 1]
+        memory_reference_point: [1, 512, 3]
+        memory_egopose: [1, 512, 4, 4]
+        memory_reference_point: [1, 512, 3]
+        memory_embedding: [1, 512, 256]
+        memory_velo: [1, 512, 2]
+        '''
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
             pseudo_reference_points = self.pseudo_reference_points.weight * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3]
@@ -498,8 +782,10 @@ class StreamPETRHead(AnchorFreeHead):
         coords[..., :2] = coords[..., :2] * torch.maximum(coords[..., 2:3], torch.ones_like(coords[..., 2:3])*eps)
 
         coords = coords.unsqueeze(-1)
-
-        img2lidars = data['lidar2img'].inverse()
+        
+        # img2lidars = data['lidar2img'].inverse() # doesn't work due to graphics card version
+        img2lidars = np.linalg.inv(data['lidar2img'].cpu().numpy())
+        img2lidars = torch.tensor(img2lidars).to(data['lidar2img'].device)
         img2lidars = img2lidars.view(BN, 1, 1, 4, 4).repeat(1, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
         img2lidars = topk_gather(img2lidars, topk_indexes)
 
@@ -520,6 +806,7 @@ class StreamPETRHead(AnchorFreeHead):
         B = query_pos.size(0)
 
         temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        # self.memory_reference_point is the the propagated memory reference points
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
@@ -677,7 +964,22 @@ class StreamPETRHead(AnchorFreeHead):
                 Shape [nb_dec, bs, num_query, 9].
         """
         self.update_tracks(data)
-        self.update_forecasts()
+        '''
+        (Pdb) self.track_position.shape
+              torch.Size([2, 1024, 6, 3])
+        (Pdb) self.track_rotation.shape
+              torch.Size([2, 1024, 6, 1])
+        (Pdb) self.track_velocity.shape
+              torch.Size([2, 1024, 6, 2])
+        (Pdb) self.track_class.shape
+              torch.Size([2, 1024, 6, 1])
+        class_names = [
+                'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+                'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+            ]
+        '''
+        
+        self.update_forecasts(data, [x['sample_idx'] for x in img_metas])
         # zero init the memory bank
         self.pre_update_memory(data)
 
@@ -748,6 +1050,9 @@ class StreamPETRHead(AnchorFreeHead):
                 'dn_mask_dict':None,
             }
 
+        '''
+        both cls_scores and bbox_preds are of size: [6, 1, 428, 10]
+        '''
         return outs
     
     def prepare_for_loss(self, mask_dict):

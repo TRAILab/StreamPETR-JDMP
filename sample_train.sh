@@ -1,0 +1,2 @@
+# bash tools/dist_train.sh projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_24e.py 1 output/first_training
+bash tools/dist_train.sh projects/configs/StreamPETR/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.py 1 output/training --resume-from /home/robert/Desktop/trail/StreamPETR-JDMP/pretrained/stream_petr_r50_flash_704_bs2_seq_428q_nui_60e.pth

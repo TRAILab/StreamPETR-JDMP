@@ -237,7 +237,6 @@ class CustomNuScenesDataset(NuScenesDataset):
                     bboxes_ignore=info['bboxes_ignore'])
             )
             input_dict['ann_info'] = annos
-            
         return input_dict
 
 
