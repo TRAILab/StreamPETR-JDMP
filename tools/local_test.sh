@@ -3,19 +3,19 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=stream_petr_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
+CONFIG_NAME=jdmp_mini_forecast_cv_bs16_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
 HOME_DIR=/home/trail/workspace
-PROJ_DIR=$HOME_DIR/StreamPETR
+PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 DATA_DIR=/data/sets/nuscenes
-OUTPUT_DIR=$HOME_DIR/output
+OUTPUT_DIR=$PROJ_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
 CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
-MODEL_CKPT=/proj/output/$CONFIG_NAME/$CONFIG_NAME.pth
+MODEL_CKPT=/proj/output/$CONFIG_NAME/latest.pth
 WRK_DIR=/proj/output/$CONFIG_NAME
 
 VOLUMES="-v $PROJ_DIR/:/proj/
