@@ -94,7 +94,7 @@ class JDMPLoadAnnotations3D(LoadAnnotations3D):
         """
         results = super().__call__(results)
         if self.with_forecast:
-            for key in ['gt_instance_ids', 'gt_forecasting_locs', 'gt_forecasting_masks']:
+            for key in ['gt_forecasting_locs', 'gt_forecasting_masks']:
                 results[key] = results['ann_info'][key]
 
         return results

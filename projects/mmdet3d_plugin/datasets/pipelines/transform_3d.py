@@ -425,7 +425,7 @@ class JDMPObjectRangeFilter(object):
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        for key in ['gt_labels_3d', 'gt_instance_ids', 
+        for key in ['gt_labels_3d',
                     'gt_forecasting_locs', 'gt_forecasting_masks']:
             input_dict[key] = input_dict[key][mask.numpy().astype(np.bool)]
 
@@ -463,7 +463,7 @@ class JDMPObjectNameFilter(object):
         gt_labels_3d = input_dict['gt_labels_3d']
         gt_bboxes_mask = np.array([n in self.labels for n in gt_labels_3d],
                                   dtype=np.bool_)
-        for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_instance_ids',
+        for key in ['gt_bboxes_3d', 'gt_labels_3d',
                     'gt_forecasting_locs', 'gt_forecasting_masks']:
             input_dict[key] = input_dict[key][gt_bboxes_mask]
 
