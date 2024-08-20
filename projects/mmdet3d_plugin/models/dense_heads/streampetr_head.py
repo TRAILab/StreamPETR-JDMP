@@ -186,7 +186,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         self.act_cfg = transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
-        self.num_pred = detect_transformer['decoder']['num_layers']
+        self.num_pred = transformer['decoder']['num_layers']
         self.normedlinear = normedlinear
         super(StreamPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
 
