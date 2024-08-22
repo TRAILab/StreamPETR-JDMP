@@ -188,7 +188,8 @@ class JDMPPETRHead(AnchorFreeHead):
 
         self.act_cfg = detect_transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
-        self.num_pred = 6
+        self.num_pred = detect_transformer['decoder']['num_layers']
+        self.num_pred_forecast = forecast_transformer['decoder']['num_layers']
         self.normedlinear = normedlinear
         super(JDMPPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
 
@@ -267,7 +268,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.reg_branches = nn.ModuleList(
             [reg_branch for _ in range(self.num_pred)])
         self.forecast_reg_branches = nn.ModuleList(
-            [forecast_reg_branch for _ in range(self.num_pred)])
+            [forecast_reg_branch for _ in range(self.num_pred_forecast)])
 
         self.position_encoder = nn.Sequential(
                 nn.Linear(self.position_dim, self.embed_dims*4),
