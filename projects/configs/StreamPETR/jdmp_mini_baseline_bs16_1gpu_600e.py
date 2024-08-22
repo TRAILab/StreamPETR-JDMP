@@ -3,15 +3,15 @@ _base_ = [
     '../../../mmdetection3d/configs/_base_/default_runtime.py'
 ]
 log_config = dict(
-    interval=55,
+    interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
         dict(type='WandbLoggerHook',
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_baseline_bs16_1gpu'),
-            interval=55)
+                name='jdmp_mini_baseline_bs16_1gpu_600e'),
+            interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
@@ -32,7 +32,7 @@ class_names = [
 num_gpus = 1
 batch_size = 16
 num_iters_per_epoch = 323 // (num_gpus * batch_size)
-num_epochs = 60
+num_epochs = 600
 
 queue_length = 1
 num_frame_losses = 1
@@ -261,9 +261,9 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=num_iters_per_epoch, pipeline=test_pipeline)
+evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
+checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 load_from=None
