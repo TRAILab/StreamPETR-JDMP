@@ -3,15 +3,15 @@
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
-#SBATCH --time=2:59:00               # Time limit hrs:min:sec
+#SBATCH --time=11:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:a100:1        # gpu:t4:4 (graham) or gpu:a100:1 (narval)
+#SBATCH --gres=gpu:a100:1           # gpu:t4:4 (graham) or gpu:a100:1 (narval)
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=ALL
 
 # Parameters
-SERVER=graham
+SERVER=narval
 DATASET=nuscenes_mini
 NUM_GPUS=1
 CFG_NAME=jdmp_mini_attforecast_graddetach_qembshare_6lay_attmem_bs16_1gpu
@@ -22,7 +22,7 @@ TMP_DATA_DIR=$SLURM_TMPDIR/data
 # TMP_DATA_DIR=/home/spapais/scratch/temp_data # Slurm unzip alternative
 PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 OUT_DIR=$HOME_DIR/output/streampetr_jdmp
-SING_IMG=/home/spapais/projects/rrg-swasland/singularity/streampetr.sif
+SING_IMG=/home/spapais/projects/rrg-swasland/spapais/singularity_images/streampetr.sif
 if [ "$SERVER" = "graham" ]; then
     DATA_DIR=/home/spapais/projects/rrg-swasland/Datasets/nuscenes
     DATA_PKL_DIR=/home/spapais/projects/rrg-swasland/Datasets/nuscenes
@@ -62,7 +62,7 @@ echo "Extracting data"
 if [ "$DATASET" = "nuscenes_mini" ]; then
     mkdir $TMP_DATA_DIR
     duration=$SECONDS
-    file=$DATA_DIR/v1.0-mini.tgz
+    file=$DATA_PKL_DIR/v1.0-mini.tgz
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
     tar -xf $file -C $TMP_DATA_DIR
     duration=$SECONDS
