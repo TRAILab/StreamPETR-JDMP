@@ -690,8 +690,8 @@ class JDMPPETRHead(AnchorFreeHead):
             outputs_forecast_coords.append(outputs_forecast_coord)
         all_forecast_preds = torch.stack(outputs_forecast_coords)
         all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
-        forecast_points = all_forecast_preds[..., :3][-1].detach()
-        self.memory_reference_point[:, :forecast_points.size(1)] = forecast_points
+        # forecast_points = all_forecast_preds[..., :3][-1].detach()
+        # self.memory_reference_point[:, :forecast_points.size(1)] = forecast_points
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
