@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_graddetach_qembshare_6lay_attmem_bs16_1gpu_600e.py',),
+                name='jdmp_mini_attforecast_prop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e.py',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -103,6 +103,8 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
+        forecast_emb_sep=True,
+        forecast_mem_update=True,
         with_position=True,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -283,9 +285,9 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
+evaluation = dict(interval=num_iters_per_epoch*num_epochs, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 load_from=None

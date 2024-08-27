@@ -98,6 +98,8 @@ class JDMPPETRHead(AnchorFreeHead):
                  depth_step=0.8,
                  depth_num=64,
                  LID=False,
+                 forecast_emb_sep=True,
+                 forecast_mem_update=True,
                  depth_start = 1,
                  position_range=[-65, -65, -8.0, 65, 65, 8.0],
                  scalar = 5,
@@ -179,6 +181,8 @@ class JDMPPETRHead(AnchorFreeHead):
         self.LID = LID
         self.depth_start = depth_start
         self.stride=stride
+        self.forecast_emb_sep = forecast_emb_sep
+        self.forecast_mem_update = forecast_mem_update
 
         self.scalar = scalar
         self.bbox_noise_scale = noise_scale
@@ -295,6 +299,12 @@ class JDMPPETRHead(AnchorFreeHead):
             nn.ReLU(),
             nn.Linear(self.embed_dims, self.embed_dims),
         )
+        if self.forecast_emb_sep:
+            self.forecast_query_embedding = nn.Sequential(
+                nn.Linear(self.embed_dims*3//2, self.embed_dims),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims, self.embed_dims),
+            )
 
         self.spatial_alignment = MLN(8)
 
@@ -302,11 +312,19 @@ class JDMPPETRHead(AnchorFreeHead):
             nn.Linear(self.embed_dims, self.embed_dims),
             nn.LayerNorm(self.embed_dims)
         )
+        if self.forecast_emb_sep:
+            self.forecast_time_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims, self.embed_dims),
+            nn.LayerNorm(self.embed_dims)
+            )
 
         # encoding ego pose
         if self.with_ego_pos:
             self.ego_pose_pe = MLN(180)
             self.ego_pose_memory = MLN(180)
+            if self.forecast_emb_sep:
+                self.forecast_ego_pose_pe = MLN(180)
+                self.forecast_ego_pose_memory = MLN(180)
 
     def init_weights(self):
         """Initialize weights of the transformer head."""
@@ -469,17 +487,27 @@ class JDMPPETRHead(AnchorFreeHead):
         memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
         memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
         temp_reference_point = (memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-        temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
+        if self.forecast_emb_sep:
+            temp_pos = self.forecast_query_embedding(pos2posemb3d(temp_reference_point))
+        else:
+            temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
         B = temp_pos.size(0)
         
         if self.with_ego_pos:
             memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
             memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
-            temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
-            temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
+            if self.forecast_emb_sep:
+                temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
+                temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
+            else:
+                temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
+                temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
 
-        temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
+        if self.forecast_emb_sep:
+            temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
+        else: 
+            temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
 
         if self.num_propagated > 0:
             tgt = temp_memory[:, :self.num_propagated]
@@ -690,8 +718,9 @@ class JDMPPETRHead(AnchorFreeHead):
             outputs_forecast_coords.append(outputs_forecast_coord)
         all_forecast_preds = torch.stack(outputs_forecast_coords)
         all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
-        # forecast_points = all_forecast_preds[..., :3][-1].detach()
-        # self.memory_reference_point[:, :forecast_points.size(1)] = forecast_points
+        if self.forecast_mem_update:
+            forecast_points = all_forecast_preds[..., :3][-1].detach()
+            self.memory_reference_point[:, :forecast_points.size(1)] = forecast_points
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
