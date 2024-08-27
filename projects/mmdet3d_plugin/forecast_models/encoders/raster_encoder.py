@@ -2,7 +2,7 @@ from projects.mmdet3d_plugin.forecast_models.encoders.encoder import PredictionE
 import torch
 import torch.nn as nn
 from torchvision.models import resnet18, resnet34, resnet50
-from positional_encodings import PositionalEncodingPermute2D
+from positional_encodings.torch_encodings import PositionalEncodingPermute2D
 from typing import Dict
 
 

@@ -4,7 +4,7 @@
 GPUS=0
 NUM_GPUS=1
 CONFIG_NAME=stream_petr_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
-DOCKER_IMG=spapais/streampetr:latest
+DOCKER_IMG=spapais/streampetr-pgp:latest
 
 # Host paths
 HOME_DIR=/home/trail/workspace

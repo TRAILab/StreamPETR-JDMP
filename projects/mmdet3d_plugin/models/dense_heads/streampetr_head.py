@@ -238,10 +238,10 @@ class StreamPETRHead(AnchorFreeHead):
         self.reset_memory()
         
         self.pgp_propagator = TrajectoryPredictor(
-            nusc_dataroot='/home/robert/Desktop/datasets/nuScenes',
-            config_path='/home/robert/Desktop/trail/PGP/configs/pgp_gatx2_lvm_traversal.yml',
-            checkpoint_path='/home/robert/Desktop/trail/PGP/PGP_lr-scheduler.tar',
-            stats_path='/home/robert/Desktop/trail/PGP/data/',
+            nusc_dataroot='/proj/data/nuscenes',
+            config_path='/proj/projects/configs/PGP/pgp_gatx2_lvm_traversal.yml',
+            checkpoint_path='/proj/ckpts/PGP_lr-scheduler.tar',
+            stats_path='/proj/data/nuscenes/stats/data',
             history_length=2,
             traversal_horizon=15,
         )
@@ -615,7 +615,7 @@ class StreamPETRHead(AnchorFreeHead):
                         best_trajectory = self.kinematic_feasibility_check(best_trajectory)
                         propagated_trajectories[b, m] = torch.from_numpy(best_trajectory)[5:, ...]
                         # Set up the map for visualization
-                        fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 10))
+                        # fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(10, 10))
                         target_agent_global_states = []
                         for i in range(1, target_agent_position.shape[0]):
                             global_states = [target_agent_position[i][0].item(), target_agent_position[i][1].item(), target_agent_rotation[i].item()]
@@ -639,6 +639,7 @@ class StreamPETRHead(AnchorFreeHead):
                         # print(f'Predicted trajectory: {best_trajectory}')
                         # print(f'CV trajectory: {cv_trajectory}\n')
                         self.cv_pgp_deviations.append(total_deviation)
+                        # breakpoint()
                         # if len(self.cv_pgp_deviations) % 100 == 0:
                         #     deviations = sorted(self.cv_pgp_deviations)
                         #     x_indices = range(len(deviations))
