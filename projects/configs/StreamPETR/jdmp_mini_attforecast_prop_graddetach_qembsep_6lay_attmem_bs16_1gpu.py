@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_graddetach_qembshare_6lay_attmem_bs16_1gpu.py',),
+                name='jdmp_mini_attforecast_prop_graddetach_qembsep_6lay_attmem_bs16_1gpu.py',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -103,6 +103,8 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
+        forecast_emb_sep=True,
+        forecast_mem_update=True,
         with_position=True,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
