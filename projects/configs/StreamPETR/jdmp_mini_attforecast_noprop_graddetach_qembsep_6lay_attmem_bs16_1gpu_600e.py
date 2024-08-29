@@ -218,7 +218,7 @@ train_pipeline = [
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_forecasting_locs', 'gt_forecasting_masks'] + collect_keys,
-             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d'))
+             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d', 'gt_labels_3d', 'sample_idx'))
 ]
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -237,7 +237,7 @@ test_pipeline = [
                 class_names=class_names,
                 with_label=False),
             dict(type='Collect3D', keys=['img'] + collect_keys,
-            meta_keys=('filename', 'ori_shape', 'img_shape','pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token'))
+            meta_keys=('filename', 'ori_shape', 'img_shape','pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'sample_idx'))
         ])
 ]
 

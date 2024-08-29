@@ -22,10 +22,10 @@ from mmdet.models.dense_heads.anchor_free_head import AnchorFreeHead
 from mmdet.models.utils.transformer import inverse_sigmoid
 from mmdet3d.core.bbox.coders import build_bbox_coder
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
-
+from projects.mmdet3d_plugin.models.utils.pgp_pred import TrajectoryPredictor
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
-from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear
+from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear, transform_velocity, transform_rotations
 
 @HEADS.register_module()
 class JDMPPETRHead(AnchorFreeHead):
@@ -100,6 +100,8 @@ class JDMPPETRHead(AnchorFreeHead):
                  LID=False,
                  forecast_emb_sep=True,
                  forecast_mem_update=True,
+                 memory_vel_transform=False,
+                 with_map_encoder=False,
                  depth_start = 1,
                  position_range=[-65, -65, -8.0, 65, 65, 8.0],
                  scalar = 5,
@@ -183,6 +185,8 @@ class JDMPPETRHead(AnchorFreeHead):
         self.stride=stride
         self.forecast_emb_sep = forecast_emb_sep
         self.forecast_mem_update = forecast_mem_update
+        self.memory_vel_transform = memory_vel_transform
+        self.with_map_encoder = with_map_encoder
 
         self.scalar = scalar
         self.bbox_noise_scale = noise_scale
@@ -235,6 +239,8 @@ class JDMPPETRHead(AnchorFreeHead):
             coords_d = self.depth_start + bin_size * index
 
         self.coords_d = nn.Parameter(coords_d, requires_grad=False)
+        if self.with_map_encoder:
+            self.pgp = TrajectoryPredictor(nusc_dataroot='/proj/data/nuscenes')
 
         self._init_layers()
         self.reset_memory()
@@ -326,6 +332,15 @@ class JDMPPETRHead(AnchorFreeHead):
                 self.forecast_ego_pose_pe = MLN(180)
                 self.forecast_ego_pose_memory = MLN(180)
 
+        # Map encoder
+        if self.with_map_encoder:
+            node_feat_size = 6
+            node_emb_size = 16
+            node_enc_size = 32
+            self.map_node_emb = nn.Linear(node_feat_size, node_emb_size)
+            self.map_node_encoder = nn.GRU(node_emb_size, node_enc_size, batch_first=True)
+            self.map_leaky_relu = nn.LeakyReLU()
+
     def init_weights(self):
         """Initialize weights of the transformer head."""
         # The initialization for transformer is important
@@ -348,6 +363,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.memory_timestamp = None
         self.memory_egopose = None
         self.memory_velo = None
+        self.memory_rotation = None
 
     def pre_update_memory(self, data):
         x = data['prev_exists']
@@ -359,15 +375,20 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_timestamp = x.new_zeros(B, self.memory_len, 1)
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
             self.memory_velo = x.new_zeros(B, self.memory_len, 2)
+            self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
             self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+            self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])
+            if self.memory_vel_transform:
+                self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose_inv'])
             self.memory_timestamp = memory_refresh(self.memory_timestamp[:, :self.memory_len], x)
             self.memory_reference_point = memory_refresh(self.memory_reference_point[:, :self.memory_len], x)
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
+            self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
         
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
@@ -382,12 +403,18 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_memory = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
             rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
+            rec_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
+            rec_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
         else:
             rec_reference_points = all_bbox_preds[..., :3][-1]
             rec_velo = all_bbox_preds[..., -2:][-1]
             rec_memory = outs_dec[-1]
             rec_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
+            rec_rot_sine = all_bbox_preds[..., 6:7]
+            rec_rot_cosine = all_bbox_preds[..., 7:8]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
         
         # topk proposals
         _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=1)
@@ -396,15 +423,20 @@ class JDMPPETRHead(AnchorFreeHead):
         rec_memory = topk_gather(rec_memory, topk_indexes).detach()
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
         rec_velo = topk_gather(rec_velo, topk_indexes).detach()
+        rec_rotation = topk_gather(rec_rotation, topk_indexes).detach()
 
         self.memory_embedding = torch.cat([rec_memory, self.memory_embedding], dim=1)
         self.memory_timestamp = torch.cat([rec_timestamp, self.memory_timestamp], dim=1)
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
         self.memory_reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
         self.memory_velo = torch.cat([rec_velo, self.memory_velo], dim=1)
+        self.memory_rotation = torch.cat([rec_rotation, self.memory_rotation], dim=1)
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
         self.memory_egopose = data['ego_pose'].unsqueeze(1) @ self.memory_egopose
+        self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose'])
+        if self.memory_vel_transform:
+            self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose'])
 
     def position_embeding(self, data, memory_centers, topk_indexes, img_metas):
         eps = 1e-5
@@ -517,6 +549,109 @@ class JDMPPETRHead(AnchorFreeHead):
             temp_pos = temp_pos[:, self.num_propagated:]
             
         return tgt, query_pos, reference_points, temp_memory, temp_pos
+
+    def map_encoding(self, sample_idx, global2ego_3dpose_matrix):
+        device = global2ego_3dpose_matrix.device
+        B, A, E = global2ego_3dpose_matrix.size(0), self.num_propagated, 20
+        global2det_2dposition = self.memory_reference_point[:, :self.num_propagated, :2]
+        global2det_yaw = self.memory_rotation[:, :self.num_propagated]
+        global2det_pose2d_vec = torch.cat([global2det_2dposition, global2det_yaw], dim=-1)
+        det2global_pose2d_mat =  self.pose2d_vec_to_matinv(global2det_pose2d_vec)
+        global2ego_2dposition = global2ego_3dpose_matrix[:, :2, 3]
+        global2ego_yaw = torch.atan2(global2ego_3dpose_matrix[:, 1, 0], global2ego_3dpose_matrix[:, 0, 0])
+        global2ego_pose2d_vec = torch.cat([global2ego_2dposition, global2ego_yaw.unsqueeze(-1)], dim=-1)
+        global2ego_pose2d_mat = self.pose2d_vec_to_mat(global2ego_pose2d_vec)
+        B = global2ego_3dpose_matrix.size(0)
+        num_map_nodes = 8
+        lane_node_feats = torch.zeros(B, self.num_propagated, num_map_nodes, 20, 6).to(device)
+        lane_node_masks = torch.zeros(B, self.num_propagated, num_map_nodes, 20, 6).to(device)
+        # test case
+        b=0
+        m=0
+        map_representation = self.pgp.get_map_representation_old(global2det_pose2d_vec[b,m].tolist(), sample_idx[b])
+        test_lane_node_feats = torch.from_numpy(map_representation['lane_node_feats']).float().to(device)
+        test_lane_node_masks = torch.from_numpy(map_representation['lane_node_masks']).float().to(device)
+        for b in range(B):
+            ego_map_representation = self.pgp.get_map_representation(global2ego_pose2d_vec[b].tolist(), sample_idx[b])
+            ego_lane_node_feats_b = torch.from_numpy(ego_map_representation['lane_node_feats']).float().to(device)
+            lane_node_masks_b = torch.from_numpy(ego_map_representation['lane_node_masks']).float().to(device)
+            N = ego_lane_node_feats_b.size(0)
+            ego2node_pose2d_vec = ego_lane_node_feats_b[..., :3]
+            ego2node_pose2d_mat = self.pose2d_vec_to_mat(ego2node_pose2d_vec)
+            global2node_pose2d_mat = torch.matmul(global2ego_pose2d_mat[b].unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(A,N,E,3,3), 
+                                                  ego2node_pose2d_mat.unsqueeze(0).expand(A,N,E,3,3))
+            det2node_pose2d_mat = torch.matmul(det2global_pose2d_mat[b].unsqueeze(1).unsqueeze(1).expand(A,N,E,3,3), 
+                                               global2node_pose2d_mat)
+            det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+            det_lane_node_feats_b = ego_lane_node_feats_b.unsqueeze(0).expand(A,N,E,6).clone()
+            det_lane_node_masks_b = lane_node_masks_b.unsqueeze(0).expand(A,N,E,6)
+            det_lane_node_feats_b[..., :3] = det2node_pose2d_vec
+            det2node_dist = torch.norm(det2node_pose2d_vec[..., :2], dim=-1)
+            det2node_dist = torch.min(det2node_dist, -1).values
+            topk_values, topk_indices = torch.topk(det2node_dist, num_map_nodes, dim=1, largest=False)
+            expanded_topk_indices = topk_indices.unsqueeze(-1).unsqueeze(-1).expand(128, 8, 20, 6)
+            det_lane_node_feats_b = torch.gather(det_lane_node_feats_b, 1, expanded_topk_indices)
+            det_lane_node_masks_b = torch.gather(det_lane_node_masks_b, 1, expanded_topk_indices)
+            lane_node_feats[b] = det_lane_node_feats_b
+            lane_node_masks[b] = det_lane_node_masks_b        
+            breakpoint()
+        lane_node_embedding = self.map_leaky_relu(self.map_node_emb(lane_node_feats))
+        lane_node_enc = self.map_variable_size_gru_encode(lane_node_embedding, lane_node_masks, self.map_node_encoder)
+        return lane_node_enc
+
+    def pose2d_vec_to_mat(self, pose2d_vec):
+        pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
+        pose2d_mat[..., 0, 0] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0, 1] = -torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 0] = torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 1] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0:2, 2] = pose2d_vec[..., 0:2]
+        return pose2d_mat
+    
+    def pose2d_vec_to_matinv(self, pose2d_vec):
+        pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
+        pose2d_mat[..., 0, 0] = torch.cos(-pose2d_vec[..., 2])
+        pose2d_mat[..., 0, 1] = -torch.sin(-pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 0] = torch.sin(-pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 1] = torch.cos(-pose2d_vec[..., 2])
+        pose2d_mat[..., 0:2, 2] = -torch.matmul(pose2d_mat[...,0:2,0:2], pose2d_vec[..., 0:2].unsqueeze(-1)).squeeze(-1)
+        return pose2d_mat
+
+    def map_variable_size_gru_encode(feat_embedding: torch.Tensor, masks: torch.Tensor, gru: nn.GRU) -> torch.Tensor:
+        """
+        Returns GRU encoding for a batch of inputs where each sample in the batch is a set of a variable number
+        of sequences, of variable lengths.
+        """
+
+        # Form a large batch of all sequences in the batch
+        masks_for_batching = ~masks[:, :, :, 0].bool()
+        masks_for_batching = masks_for_batching.any(dim=-1).unsqueeze(2).unsqueeze(3)
+        feat_embedding_batched = torch.masked_select(feat_embedding, masks_for_batching)
+        feat_embedding_batched = feat_embedding_batched.view(-1, feat_embedding.shape[2], feat_embedding.shape[3])
+
+        # Pack padded sequences
+        seq_lens = torch.sum(1 - masks[:, :, :, 0], dim=-1)
+        seq_lens_batched = seq_lens[seq_lens != 0].cpu()
+        if len(seq_lens_batched) != 0:
+            feat_embedding_packed = torch.nn.utils.rnn.pack_padded_sequence(
+                feat_embedding_batched, seq_lens_batched, batch_first=True, enforce_sorted=False)
+
+            # Encode
+            _, encoding_batched = gru(feat_embedding_packed)
+            encoding_batched = encoding_batched.squeeze(0)
+
+            # Scatter back to appropriate batch index
+            masks_for_scattering = masks_for_batching.squeeze(3).repeat(1, 1, encoding_batched.shape[-1])
+            encoding = torch.zeros(masks_for_scattering.shape, device=feat_embedding.device)
+            encoding = encoding.masked_scatter(masks_for_scattering, encoding_batched)
+
+        else:
+            batch_size = feat_embedding.shape[0]
+            max_num = feat_embedding.shape[1]
+            hidden_state_size = gru.hidden_size
+            encoding = torch.zeros((batch_size, max_num, hidden_state_size), device=feat_embedding.device)
+
+        return encoding
 
     def prepare_for_dn(self, batch_size, reference_points, img_metas):
         if self.training and self.with_dn:
@@ -701,6 +836,9 @@ class JDMPPETRHead(AnchorFreeHead):
         forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
             forecast_temp_pos = self.forecast_alignment(data)
         forecast_attn_mask = None
+        if self.with_map_encoder:
+            sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+            map_encoding = self.map_encoding(sample_idx, data['ego_pose'])
 
         # Forecasting
         outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask, forecast_temp_memory, forecast_temp_pos)

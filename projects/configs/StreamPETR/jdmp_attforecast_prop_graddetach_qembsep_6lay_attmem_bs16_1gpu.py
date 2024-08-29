@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_prop_graddetach_qembshare_6lay_attmem_bs16_1gpu_600e.py',),
+                name='jdmp_attforecast_graddetach_qembshare_6lay_attmem_bs16_1gpu.py',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -31,8 +31,8 @@ class_names = [
 
 num_gpus = 1
 batch_size = 16
-num_iters_per_epoch = 323 // (num_gpus * batch_size)
-num_epochs = 600
+num_iters_per_epoch = 28130 // (num_gpus * batch_size)
+num_epochs = 60
 
 queue_length = 1
 num_frame_losses = 1
@@ -103,8 +103,6 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
-        forecast_emb_sep=False,
-        forecast_mem_update=True,
         with_position=True,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
@@ -247,7 +245,7 @@ data = dict(
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl',
+        ann_file=data_root + 'nuscenes2d_temporal_infos_train.pkl',
         num_frame_losses=num_frame_losses,
         seq_split_num=2, # streaming video training
         seq_mode=True, # streaming video training
@@ -260,8 +258,8 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
@@ -285,9 +283,9 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=num_iters_per_epoch*num_epochs, pipeline=test_pipeline)
+evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 load_from=None

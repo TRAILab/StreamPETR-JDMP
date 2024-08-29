@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_mini_attforecast_graddetach_qembshare_6lay_attmem_bs16_1gpu
+CONFIG_NAME=jdmp_mini_attforecast_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
