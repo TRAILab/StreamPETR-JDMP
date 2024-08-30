@@ -279,7 +279,7 @@ def _fill_trainval_infos(nusc,
                 [a['num_radar_pts'] for a in annotations])
             info['valid_flag'] = valid_flag
 
-            forecasting_length = 11 # 5 seconds + current frame
+            forecasting_length = 13 # 6 seconds + current frame
             fboxes, fmasks, ftypes = get_forecasting_annotations(nusc, annotations, forecasting_length)
             locs = [np.array([b.center for b in boxes]).reshape(-1, 3) for boxes in fboxes]
             info['gt_forecasting_locs'] = np.array(locs)
