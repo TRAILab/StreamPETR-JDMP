@@ -412,8 +412,8 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_memory = outs_dec[-1]
             rec_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
-            rec_rot_sine = all_bbox_preds[..., 6:7]
-            rec_rot_cosine = all_bbox_preds[..., 7:8]
+            rec_rot_sine = all_bbox_preds[..., 6:7][-1]
+            rec_rot_cosine = all_bbox_preds[..., 7:8][-1]
             rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
         
         # topk proposals
@@ -430,6 +430,8 @@ class JDMPPETRHead(AnchorFreeHead):
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
         self.memory_reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
         self.memory_velo = torch.cat([rec_velo, self.memory_velo], dim=1)
+        if rec_rotation.dim() > 3 or self.memory_rotation.dim() > 3:
+            breakpoint()
         self.memory_rotation = torch.cat([rec_rotation, self.memory_rotation], dim=1)
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
