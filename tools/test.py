@@ -229,8 +229,9 @@ def main():
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
-        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
+        outputs, all_forecast_preds = custom_multi_gpu_test(model, data_loader, args.tmpdir,
                                         args.gpu_collect)
+        breakpoint()
 
     rank, _ = get_dist_info()
     if rank == 0:

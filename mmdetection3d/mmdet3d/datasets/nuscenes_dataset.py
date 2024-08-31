@@ -586,6 +586,7 @@ def output_to_nusc_box(detection, with_velocity=True):
     Returns:
         list[:obj:`NuScenesBox`]: List of standard NuScenesBoxes.
     """
+
     box3d = detection['boxes_3d']
     scores = detection['scores_3d'].numpy()
     labels = detection['labels_3d'].numpy()

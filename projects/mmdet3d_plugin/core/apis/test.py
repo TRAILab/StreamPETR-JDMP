@@ -70,6 +70,11 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     for i, data in enumerate(data_loader):
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
+            
+            if len(result) > 1:
+                all_forecast_preds = result[1]
+                result = result[0]
+                
             # encode mask results
             if isinstance(result, dict):
                 if 'bbox_results' in result.keys():
@@ -88,6 +93,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
             #    result = [(bbox_results, encode_mask_results(mask_results))
             #              for bbox_results, mask_results in result]
+            # breakpoint()
         if rank == 0:
             
             for _ in range(batch_size * world_size):
