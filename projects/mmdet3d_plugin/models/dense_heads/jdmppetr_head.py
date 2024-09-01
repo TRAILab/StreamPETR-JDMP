@@ -430,8 +430,6 @@ class JDMPPETRHead(AnchorFreeHead):
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
         self.memory_reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
         self.memory_velo = torch.cat([rec_velo, self.memory_velo], dim=1)
-        if rec_rotation.dim() > 3 or self.memory_rotation.dim() > 3:
-            breakpoint()
         self.memory_rotation = torch.cat([rec_rotation, self.memory_rotation], dim=1)
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
@@ -595,7 +593,27 @@ class JDMPPETRHead(AnchorFreeHead):
             det_lane_node_feats_b = torch.gather(det_lane_node_feats_b, 1, expanded_topk_indices)
             det_lane_node_masks_b = torch.gather(det_lane_node_masks_b, 1, expanded_topk_indices)
             lane_node_feats[b] = det_lane_node_feats_b
-            lane_node_masks[b] = det_lane_node_masks_b        
+            lane_node_masks[b] = det_lane_node_masks_b
+            # plot test
+            import matplotlib.pyplot as plt
+            position_lanes_1 = test_lane_node_feats[:, :, :2]
+            masks_1 = test_lane_node_masks[:, :, 0] == 0
+            position_lanes_2 = det_lane_node_feats_b[0, :, :, :2]
+            masks_2 = det_lane_node_masks_b[0, :, :, 0] == 0
+            plt.figure(figsize=(10, 10))
+            breakpoint()
+            for i in range(position_lanes_1.shape[0]):
+                position = position_lanes_1[i][masks_1[i]].cpu().numpy()
+                plt.plot(position[:, 0], position[:, 1], color='blue', alpha=0.6)
+            for i in range(position_lanes_2.shape[0]):
+                position = position_lanes_2[i][masks_2[i]].cpu().numpy()
+                plt.plot(position[:, 0], position[:, 1], color='red', alpha=0.6)
+            plt.xlabel('X Position')
+            plt.ylabel('Y Position')
+            plt.title('Plot of Lane Lines')
+            plt.grid(True)
+            plt.savefig('/proj/output/viz/map_debug/map_lane_plots.png', dpi=300, bbox_inches='tight')
+            plt.close()
             breakpoint()
         lane_node_embedding = self.map_leaky_relu(self.map_node_emb(lane_node_feats))
         lane_node_enc = self.map_variable_size_gru_encode(lane_node_embedding, lane_node_masks, self.map_node_encoder)
