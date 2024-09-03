@@ -26,6 +26,7 @@ from projects.mmdet3d_plugin.models.utils.pgp_pred import TrajectoryPredictor
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
 from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear, transform_velocity, transform_rotations
+import math
 
 @HEADS.register_module()
 class JDMPPETRHead(AnchorFreeHead):
@@ -334,11 +335,12 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # Map encoder
         if self.with_map_encoder:
-            node_feat_size = 6
-            node_emb_size = 16
-            node_enc_size = 32
-            self.map_node_emb = nn.Linear(node_feat_size, node_emb_size)
-            self.map_node_encoder = nn.GRU(node_emb_size, node_enc_size, batch_first=True)
+            self.map_topk_nodes = 32
+            self.map_feat_size = 6
+            self.map_emb_size = 16
+            self.map_enc_size = 32
+            self.map_node_emb = nn.Linear(self.map_feat_size, self.map_emb_size)
+            self.map_node_encoder = nn.GRU(self.map_emb_size, self.map_enc_size, batch_first=True)
             self.map_leaky_relu = nn.LeakyReLU()
 
     def init_weights(self):
@@ -551,74 +553,139 @@ class JDMPPETRHead(AnchorFreeHead):
         return tgt, query_pos, reference_points, temp_memory, temp_pos
 
     def map_encoding(self, sample_idx, global2ego_3dpose_matrix):
+        # Params for map encoding TODO: move to config
+        n_topk_nodes = self.map_topk_nodes
+        n_map_feats = self.map_feat_size
+        debug = False
+        B, A, N, E = global2ego_3dpose_matrix.size(0), self.num_propagated, self.pgp.max_nodes, self.pgp.polyline_length
         device = global2ego_3dpose_matrix.device
-        B, A, E = global2ego_3dpose_matrix.size(0), self.num_propagated, 20
+
+        # Extract detection and ego poses
         global2det_2dposition = self.memory_reference_point[:, :self.num_propagated, :2]
         global2det_yaw = self.memory_rotation[:, :self.num_propagated]
+        global2det_yaw = global2det_yaw + torch.tensor(math.pi)/2
         global2det_pose2d_vec = torch.cat([global2det_2dposition, global2det_yaw], dim=-1)
         det2global_pose2d_mat =  self.pose2d_vec_to_matinv(global2det_pose2d_vec)
         global2ego_2dposition = global2ego_3dpose_matrix[:, :2, 3]
-        global2ego_yaw = torch.atan2(global2ego_3dpose_matrix[:, 1, 0], global2ego_3dpose_matrix[:, 0, 0])
+        global2ego_yaw = torch.atan2(global2ego_3dpose_matrix[:, 1, 0], global2ego_3dpose_matrix[:, 0, 0]) 
+        global2ego_yaw = global2ego_yaw + torch.tensor(math.pi)/2
         global2ego_pose2d_vec = torch.cat([global2ego_2dposition, global2ego_yaw.unsqueeze(-1)], dim=-1)
         global2ego_pose2d_mat = self.pose2d_vec_to_mat(global2ego_pose2d_vec)
-        B = global2ego_3dpose_matrix.size(0)
-        num_map_nodes = 8
-        lane_node_feats = torch.zeros(B, self.num_propagated, num_map_nodes, 20, 6).to(device)
-        lane_node_masks = torch.zeros(B, self.num_propagated, num_map_nodes, 20, 6).to(device)
-        # test case
-        b=0
-        m=0
-        map_representation = self.pgp.get_map_representation_old(global2det_pose2d_vec[b,m].tolist(), sample_idx[b])
-        test_lane_node_feats = torch.from_numpy(map_representation['lane_node_feats']).float().to(device)
-        test_lane_node_masks = torch.from_numpy(map_representation['lane_node_masks']).float().to(device)
+
+        # Get map representation # TODO: vectorize loop, cache ego map feats
+        map_feats = torch.zeros(B, A, n_topk_nodes, E, n_map_feats).to(device)
+        map_masks = torch.zeros(B, A, n_topk_nodes, E, n_map_feats).to(device)
         for b in range(B):
+            # Get map features in ego frame
             ego_map_representation = self.pgp.get_map_representation(global2ego_pose2d_vec[b].tolist(), sample_idx[b])
-            ego_lane_node_feats_b = torch.from_numpy(ego_map_representation['lane_node_feats']).float().to(device)
-            lane_node_masks_b = torch.from_numpy(ego_map_representation['lane_node_masks']).float().to(device)
-            N = ego_lane_node_feats_b.size(0)
-            ego2node_pose2d_vec = ego_lane_node_feats_b[..., :3]
+            ego_map_feats_b = torch.from_numpy(ego_map_representation['lane_node_feats']).float().to(device)
+            ego_map_masks_b = torch.from_numpy(ego_map_representation['lane_node_masks']).float().to(device)
+            ego2node_pose2d_vec = ego_map_feats_b[..., :3]
             ego2node_pose2d_mat = self.pose2d_vec_to_mat(ego2node_pose2d_vec)
-            global2node_pose2d_mat = torch.matmul(global2ego_pose2d_mat[b].unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(A,N,E,3,3), 
-                                                  ego2node_pose2d_mat.unsqueeze(0).expand(A,N,E,3,3))
-            det2node_pose2d_mat = torch.matmul(det2global_pose2d_mat[b].unsqueeze(1).unsqueeze(1).expand(A,N,E,3,3), 
-                                               global2node_pose2d_mat)
-            det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
-            det_lane_node_feats_b = ego_lane_node_feats_b.unsqueeze(0).expand(A,N,E,6).clone()
-            det_lane_node_masks_b = lane_node_masks_b.unsqueeze(0).expand(A,N,E,6)
-            det_lane_node_feats_b[..., :3] = det2node_pose2d_vec
+            # Get transformations for agent to map node in ego frame
+            det2ego_pose2d_mat = torch.matmul(det2global_pose2d_mat[b].unsqueeze(1).unsqueeze(1).expand(A,N,E,3,3),
+                                              global2ego_pose2d_mat[b].unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(A,N,E,3,3))
+            det2ego_pose2d_vec = torch.cat([det2ego_pose2d_mat[..., 0:2, 2],
+                torch.atan2(det2ego_pose2d_mat[..., 1, 0], det2ego_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+            ego2det_pose2d_mat = self.pose2d_vec_to_matinv(det2ego_pose2d_vec)
+            det2ego_pose2d_mat[..., 0:2, 0:2] = torch.eye(2, device=device).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(A,N,E,2,2)
+            det2ego_pose2d_mat[...,0:2, 2] = - ego2det_pose2d_mat[..., 0:2, 2]
+            det2node_pose2d_mat = torch.matmul(det2ego_pose2d_mat,
+                                               ego2node_pose2d_mat.unsqueeze(0).expand(A,N,E,3,3))
+            det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], 
+                torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+            # Get transformations for agent to map node in agent frame
+            # global2node_pose2d_mat = torch.matmul(global2ego_pose2d_mat[b].unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(A,N,E,3,3), 
+            #                                       ego2node_pose2d_mat.unsqueeze(0).expand(A,N,E,3,3))
+            # det2node_pose2d_mat = torch.matmul(det2global_pose2d_mat[b].unsqueeze(1).unsqueeze(1).expand(A,N,E,3,3), 
+            #                                    global2node_pose2d_mat)            
+            # det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], 
+            #     torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+            # Transform map features to agent frame and get topk nearest nodes
+            det_map_feats_b = ego_map_feats_b.unsqueeze(0).expand(A,N,E,n_map_feats).clone()
+            det_map_masks_b = ego_map_masks_b.unsqueeze(0).expand(A,N,E,n_map_feats)
+            det_map_feats_b[..., :3] = det2node_pose2d_vec
             det2node_dist = torch.norm(det2node_pose2d_vec[..., :2], dim=-1)
             det2node_dist = torch.min(det2node_dist, -1).values
-            topk_values, topk_indices = torch.topk(det2node_dist, num_map_nodes, dim=1, largest=False)
-            expanded_topk_indices = topk_indices.unsqueeze(-1).unsqueeze(-1).expand(128, 8, 20, 6)
-            det_lane_node_feats_b = torch.gather(det_lane_node_feats_b, 1, expanded_topk_indices)
-            det_lane_node_masks_b = torch.gather(det_lane_node_masks_b, 1, expanded_topk_indices)
-            lane_node_feats[b] = det_lane_node_feats_b
-            lane_node_masks[b] = det_lane_node_masks_b
-            # plot test
-            import matplotlib.pyplot as plt
-            position_lanes_1 = test_lane_node_feats[:, :, :2]
-            masks_1 = test_lane_node_masks[:, :, 0] == 0
-            position_lanes_2 = det_lane_node_feats_b[0, :, :, :2]
-            masks_2 = det_lane_node_masks_b[0, :, :, 0] == 0
-            plt.figure(figsize=(10, 10))
-            breakpoint()
-            for i in range(position_lanes_1.shape[0]):
-                position = position_lanes_1[i][masks_1[i]].cpu().numpy()
-                plt.plot(position[:, 0], position[:, 1], color='blue', alpha=0.6)
-            for i in range(position_lanes_2.shape[0]):
-                position = position_lanes_2[i][masks_2[i]].cpu().numpy()
-                plt.plot(position[:, 0], position[:, 1], color='red', alpha=0.6)
-            plt.xlabel('X Position')
-            plt.ylabel('Y Position')
-            plt.title('Plot of Lane Lines')
-            plt.grid(True)
-            plt.savefig('/proj/output/viz/map_debug/map_lane_plots.png', dpi=300, bbox_inches='tight')
-            plt.close()
-            breakpoint()
-        lane_node_embedding = self.map_leaky_relu(self.map_node_emb(lane_node_feats))
-        lane_node_enc = self.map_variable_size_gru_encode(lane_node_embedding, lane_node_masks, self.map_node_encoder)
-        return lane_node_enc
+            topk_values, topk_indices = torch.topk(det2node_dist, n_topk_nodes, dim=1, largest=False)
+            expanded_topk_indices = topk_indices.unsqueeze(-1).unsqueeze(-1).expand(A, n_topk_nodes, E, n_map_feats)
+            det_map_feats_b = torch.gather(det_map_feats_b, 1, expanded_topk_indices)
+            det_map_masks_b = torch.gather(det_map_masks_b, 1, expanded_topk_indices)
+            map_feats[b] = det_map_feats_b
+            map_masks[b] = det_map_masks_b
+            if debug:
+                det2ego_pose2d_mat_b = torch.matmul(det2global_pose2d_mat[b],
+                    global2ego_pose2d_mat[b].unsqueeze(0).expand(A,3,3))
+                self.debug_map_encoding(sample_idx[b], det2ego_pose2d_mat_b, global2det_pose2d_vec[b],
+                                        det_map_feats_b, det_map_masks_b, ego_map_feats_b, ego_map_masks_b)
+        map_embedding = self.map_leaky_relu(self.map_node_emb(map_feats))
+        map_encoding = self.map_variable_size_gru_encode(map_embedding, map_masks, self.map_node_encoder)
+        return map_encoding
 
+    def debug_map_encoding(self, sample_idx, det2ego_pose2d_mat_b, global2det_pose2d_vec_b,
+                           det_lane_node_feats_b, det_lane_node_masks_b, ego_lane_node_feats_b, ego_lane_node_masks_b):
+        # Debug plots for a single agent and batch
+        agent_id = 0
+        arrow_width = 0.5
+        scatter_size = 10
+        global2det_pose2d_vec_np = global2det_pose2d_vec_b.detach().cpu().numpy()
+        import matplotlib.pyplot as plt
+        # MAP PLOT - AGENT FRAME
+        det2ego_pose2d_vec = torch.cat([det2ego_pose2d_mat_b[..., 0:2, 2], 
+            torch.atan2(det2ego_pose2d_mat_b[..., 1, 0], det2ego_pose2d_mat_b[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        det2ego_pos_x = det2ego_pose2d_vec.detach().cpu().numpy()[agent_id, 0]
+        det2ego_pos_y = det2ego_pose2d_vec.detach().cpu().numpy()[agent_id, 1]
+        det2ego_yaw = det2ego_pose2d_vec.detach().cpu().numpy()[agent_id, 2]
+        map_representation = self.pgp.get_map_representation(global2det_pose2d_vec_np[agent_id].tolist(), sample_idx, True)
+        test_lane_node_feats = map_representation['lane_node_feats']
+        test_lane_node_masks = map_representation['lane_node_masks']
+        position_lanes_det0 = test_lane_node_feats[:, :, :2]
+        masks_lanes_det0 = test_lane_node_masks[:, :, 0] == 0
+        position_lanes_det1 = det_lane_node_feats_b[0, :, :, :2].detach().cpu().numpy()
+        masks_lanes_det1 = det_lane_node_masks_b[0, :, :, 0].detach().cpu().numpy() == 0
+        plt.figure(figsize=(10, 10))
+        for i in range(position_lanes_det0.shape[0]):
+            position = position_lanes_det0[i][masks_lanes_det0[i]]
+            plt.plot(position[:, 0], position[:, 1], color='blue', alpha=0.6)
+        for i in range(position_lanes_det1.shape[0]):
+            position = position_lanes_det1[i][masks_lanes_det1[i]]
+            plt.plot(position[:, 0], position[:, 1], color='red', alpha=0.6)
+        plt.scatter(det2ego_pos_x, det2ego_pos_y, c='green', s=scatter_size)
+        plt.arrow(det2ego_pos_x, det2ego_pos_y, 
+                  5*math.cos(det2ego_yaw), 5*math.sin(det2ego_yaw), 
+                  width=arrow_width, fc='g', ec='g')
+        plt.scatter(0, 0, c='red', s=scatter_size)
+        plt.arrow(0, 0, 5, 0, width=arrow_width, fc='r', ec='r')
+        plt.xlabel('X Position Agent')
+        plt.ylabel('Y Position Agent')
+        plt.grid(True)
+        plt.savefig('/proj/output/viz/map_debug_new/sample_'+sample_idx+'_map_encoder_agentframe.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        ## MAP PLOT - EGO FRAME
+        ego2det_pose2d_mat = self.pose2d_vec_to_matinv(det2ego_pose2d_vec)
+        ego2det_pose2d_vec = torch.cat([ego2det_pose2d_mat[..., 0:2, 2], 
+            torch.atan2(ego2det_pose2d_mat[..., 1, 0], ego2det_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        ego2det_pos_x = ego2det_pose2d_vec[agent_id, 0].cpu().numpy()
+        ego2det_pos_y = ego2det_pose2d_vec[agent_id, 1].cpu().numpy()
+        ego2det_yaw = ego2det_pose2d_vec[agent_id, 2].cpu().numpy()
+        position_lanes_ego = ego_lane_node_feats_b[:, :, :2].detach().cpu().numpy()
+        masks_lanes_ego = ego_lane_node_masks_b[:, :, 0].detach().cpu().numpy() == 0
+        plt.figure(figsize=(10, 10))
+        for i in range(position_lanes_ego.shape[0]):
+            position = position_lanes_ego[i][masks_lanes_ego[i]]
+            plt.plot(position[:, 0], position[:, 1], color='green', alpha=0.6)
+        plt.scatter(ego2det_pos_x, ego2det_pos_y, c='red', s=scatter_size)
+        plt.arrow(ego2det_pos_x, ego2det_pos_y, 
+                  5*math.cos(ego2det_yaw), 5*math.sin(ego2det_yaw), 
+                  width=arrow_width, fc='r', ec='r')
+        plt.scatter(0, 0, c='green', s=scatter_size)
+        plt.arrow(0, 0, 5, 0, width=arrow_width, fc='g', ec='g')
+        plt.xlabel('X Position Ego')
+        plt.ylabel('Y Position Ego')
+        plt.grid(True)
+        plt.savefig('/proj/output/viz/map_debug_new/sample_'+sample_idx+'_map_encoder_egoframe.png', dpi=300, bbox_inches='tight')
+        plt.close()
+            
     def pose2d_vec_to_mat(self, pose2d_vec):
         pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
         pose2d_mat[..., 0, 0] = torch.cos(pose2d_vec[..., 2])
@@ -637,6 +704,7 @@ class JDMPPETRHead(AnchorFreeHead):
         pose2d_mat[..., 0:2, 2] = -torch.matmul(pose2d_mat[...,0:2,0:2], pose2d_vec[..., 0:2].unsqueeze(-1)).squeeze(-1)
         return pose2d_mat
 
+    @staticmethod
     def map_variable_size_gru_encode(feat_embedding: torch.Tensor, masks: torch.Tensor, gru: nn.GRU) -> torch.Tensor:
         """
         Returns GRU encoding for a batch of inputs where each sample in the batch is a set of a variable number
@@ -644,13 +712,13 @@ class JDMPPETRHead(AnchorFreeHead):
         """
 
         # Form a large batch of all sequences in the batch
-        masks_for_batching = ~masks[:, :, :, 0].bool()
-        masks_for_batching = masks_for_batching.any(dim=-1).unsqueeze(2).unsqueeze(3)
+        masks_for_batching = ~masks[:, :, :, :, 0].bool()
+        masks_for_batching = masks_for_batching.any(dim=-1).unsqueeze(3).unsqueeze(4)
         feat_embedding_batched = torch.masked_select(feat_embedding, masks_for_batching)
-        feat_embedding_batched = feat_embedding_batched.view(-1, feat_embedding.shape[2], feat_embedding.shape[3])
+        feat_embedding_batched = feat_embedding_batched.view(-1, feat_embedding.shape[3], feat_embedding.shape[4])
 
         # Pack padded sequences
-        seq_lens = torch.sum(1 - masks[:, :, :, 0], dim=-1)
+        seq_lens = torch.sum(1 - masks[:, :, :, :, 0], dim=-1)
         seq_lens_batched = seq_lens[seq_lens != 0].cpu()
         if len(seq_lens_batched) != 0:
             feat_embedding_packed = torch.nn.utils.rnn.pack_padded_sequence(
@@ -661,7 +729,7 @@ class JDMPPETRHead(AnchorFreeHead):
             encoding_batched = encoding_batched.squeeze(0)
 
             # Scatter back to appropriate batch index
-            masks_for_scattering = masks_for_batching.squeeze(3).repeat(1, 1, encoding_batched.shape[-1])
+            masks_for_scattering = masks_for_batching.squeeze(4).repeat(1, 1, 1, encoding_batched.shape[-1])
             encoding = torch.zeros(masks_for_scattering.shape, device=feat_embedding.device)
             encoding = encoding.masked_scatter(masks_for_scattering, encoding_batched)
 
@@ -670,7 +738,6 @@ class JDMPPETRHead(AnchorFreeHead):
             max_num = feat_embedding.shape[1]
             hidden_state_size = gru.hidden_size
             encoding = torch.zeros((batch_size, max_num, hidden_state_size), device=feat_embedding.device)
-
         return encoding
 
     def prepare_for_dn(self, batch_size, reference_points, img_metas):

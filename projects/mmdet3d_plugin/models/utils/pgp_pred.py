@@ -8,7 +8,6 @@ from shapely.geometry.polygon import Polygon
 from scipy.spatial.distance import cdist
 from nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
-from nuscenes.prediction.input_representation.static_layers import correct_yaw
 
 class TrajectoryPredictor:
     def __init__(self,
@@ -26,66 +25,38 @@ class TrajectoryPredictor:
         self.polyline_length = 20
         self.max_nodes = 164
         self.max_nbr_nodes = 14
-        self.radius = 100
-        
-        # Debug visualizations
-        self.debug_nusc_map = None
-        self.debug_global_pose = None
-        self.debug_lanes = None
-        self.debug_polygons = None
-        self.debug_e_succ = None
-        self.debug_e_prox = None
-        self.debug_lane_ids = None
-        self.debug_target_agent = None
-        
-    def get_map_representation_old(self, target_agent, sample_token):
-        # yaw = quaternion_yaw(Quaternion(target_agent['rotation']))
-        yaw = target_agent[-1]
-        yaw = correct_yaw(yaw)
-        global_pose = (target_agent[0], target_agent[1], yaw) # self.quaternion_to_yaw(*target_agent['rotation']))
-        nusc_map = self.maps[self.sample_token_to_map_location(sample_token)]
-        # nusc_map = self.maps[self.get_closest_map_bounds(target_agent[0], target_agent[1])]
-        lanes = self.get_lanes_around_agent(global_pose, nusc_map, self.radius)
-        polygons = self.get_polygons_around_agent(global_pose, nusc_map, self.radius)
-        lane_node_feats, lane_ids = self.get_lane_node_feats(global_pose, lanes, polygons)
-        lane_node_feats, lane_ids = self.topk_lane_poses(lane_node_feats, lane_ids, topk=self.max_nodes)
-        e_succ = self.get_successor_edges(lane_ids, nusc_map)
-        e_prox = self.get_proximal_edges(lane_node_feats, e_succ)
-        # print(e_succ)
-        # print(e_prox)
-        
-        # Debug visualizations
-        self.debug_nusc_map = nusc_map
-        self.debug_global_pose = global_pose
-        self.debug_lanes = lanes
-        self.debug_polygons = polygons
-        self.debug_e_succ = e_succ
-        self.debug_e_prox = e_prox
-        self.debug_lane_ids = lane_ids
-        self.debug_target_agent = target_agent
-        
-        lane_node_feats = self.add_boundary_flag(e_succ, lane_node_feats)
-        # Add dummy node (0, 0, 0, 0, 0, 0) if no lane nodes are found
-        if len(lane_node_feats) == 0:
-            lane_node_feats = [np.zeros((1, 6))]
-            e_succ = [[]]
-            e_prox = [[]]
+        self.map_extent = [-50, 50, -20, 80]
+        self.radius = 80
+            
+    def discard_poses_outside_extent(self, pose_set: List[np.ndarray],
+                                    ids: List[str] = None) -> Union[List[np.ndarray],
+                                                                    Tuple[List[np.ndarray], List[str]]]:
+        """
+        Discards lane or agent poses outside predefined extent in target agent's frame of reference.
+        :param pose_set: agent or lane polyline poses
+        :param ids: annotation record tokens for pose_set. Only applies to lanes.
+        :return: Updated pose set
+        """
+        updated_pose_set = []
+        updated_ids = []
 
+        for m, poses in enumerate(pose_set):
+            flag = False
+            for n, pose in enumerate(poses):
+                if self.map_extent[0] <= pose[0] <= self.map_extent[1] and \
+                        self.map_extent[2] <= pose[1] <= self.map_extent[3]:
+                    flag = True
 
-        num_nbrs = [len(e_succ[i]) + len(e_prox[i]) for i in range(len(e_succ))]
-        max_nbrs = max(num_nbrs) if len(num_nbrs) > 0 else 0
-        num_nodes = len(lane_node_feats)
+            if flag:
+                updated_pose_set.append(poses)
+                if ids is not None:
+                    updated_ids.append(ids[m])
 
-        s_next, edge_type = self.get_edge_lookup(e_succ, e_prox, self.max_nodes, self.max_nbr_nodes)
-        lane_node_feats, lane_node_masks = self.list_to_tensor(lane_node_feats, self.max_nodes, self.polyline_length, 6)
-        map_representation = {
-            'lane_node_feats': lane_node_feats,
-            'lane_node_masks': lane_node_masks,
-            's_next': s_next,
-            'edge_type': edge_type
-        }
-        return map_representation
-    
+        if ids is not None:
+            return updated_pose_set, updated_ids
+        else:
+            return updated_pose_set
+
     def topk_lane_poses(self, pose_set: List[np.ndarray],
                                     ids: List[str] = None, topk = 128) -> Union[List[np.ndarray],
                                                                     Tuple[List[np.ndarray], List[str]]]:
@@ -111,16 +82,29 @@ class TrajectoryPredictor:
             return updated_pose_set
 
 
-    def get_map_representation(self, target_agent, sample_token):
+    def get_map_representation(self, target_agent, sample_token, plot=False):
         yaw = target_agent[-1]
-        yaw = correct_yaw(yaw)
+        # yaw = -np.pi - yaw if yaw <= 0 else np.pi - yaw # global to map
         global_pose = (target_agent[0], target_agent[1], yaw)
         nusc_map = self.maps[self.sample_token_to_map_location(sample_token)]
         lanes = self.get_lanes_around_agent(global_pose, nusc_map, self.radius)
-        polygons = self.get_polygons_around_agent(global_pose, nusc_map, self.radius)
+        polygons = self.get_polygons_around_agent(global_pose, nusc_map, self.radius, ['stop_line', 'ped_crossing'])
+        if plot:
+            import matplotlib.pyplot as plt
+            text_pose = '_'.join(map(lambda x: str(round(x)), global_pose))
+            out_path = '/proj/output/viz/map_debug_new/sample_'+sample_token+'_map_encoder_map_patch_'+text_pose+'.png'
+            my_patch = (target_agent[0]-self.radius, target_agent[1]-self.radius, 
+                        target_agent[0]+self.radius, target_agent[1]+self.radius)
+            nusc_map.render_map_patch(my_patch, nusc_map.non_geometric_layers, figsize=(10, 10))
+            plt.scatter(target_agent[0], target_agent[1], c='red', s=10)
+            plt.arrow(target_agent[0], target_agent[1], 5*np.cos(yaw), 5*np.sin(yaw), 
+                      color='red', width=0.5)
+            plt.savefig(out_path, bbox_inches='tight', pad_inches=0)
+            plt.close()
+            # self.plot_map_representation(global_pose, nusc_map, out_path)
         lane_node_feats, lane_ids = self.get_lane_node_feats(global_pose, lanes, polygons)
         lane_node_feats, lane_ids = self.topk_lane_poses(lane_node_feats, lane_ids, topk=self.max_nodes)
-        e_succ = self.get_successor_edges(lane_ids, nusc_map)
+        e_succ = self.get_successor_edges(lane_ids, nusc_map)        
         
         lane_node_feats = self.add_boundary_flag(e_succ, lane_node_feats)
         if len(lane_node_feats) == 0:
@@ -132,6 +116,31 @@ class TrajectoryPredictor:
             'lane_node_masks': lane_node_masks,
         }
         return map_representation
+
+    def plot_map_representation(self, global_pose, nusc_map, file_name):
+        import matplotlib.pyplot as plt
+        plt.figure()
+        # Plot polygons
+        layer_names = ['stop_line', 'ped_crossing', 'walkway']
+        poly_colors = ['red', 'orange', 'blue']
+        polygons = self.get_polygons_around_agent(global_pose, nusc_map, self.radius, layer_names) 
+        for n, k in enumerate(polygons.keys()):
+            for polygon in polygons[k]:
+                x_exterior, y_exterior = polygon.exterior.xy
+                plt.fill(x_exterior, y_exterior, alpha=0.5, edgecolor=poly_colors[n], facecolor=poly_colors[n])
+                for interior in polygon.interiors:
+                    x_interior, y_interior = interior.xy
+                    plt.fill(x_interior, y_interior, alpha=1, edgecolor=poly_colors[n], facecolor='white')
+        # Plot lanes
+        lanes = self.get_lanes_around_agent(global_pose, nusc_map, self.radius)
+        lanes = {**lanes['lanes'], **lanes['lane_connectors']}
+        lanes = [v for k, v in lanes.items()]
+        for lane in lanes:
+            lane = np.array(lane)
+            plt.plot(lane[:, 0], lane[:, 1], 'green', linewidth=0.5)
+        # Save figure
+        plt.savefig(file_name, dpi=300)
+        plt.close()
 
     def sample_token_to_map_location(self, sample_token):
         sample_ind = self.nusc_token2ind['sample'][sample_token]
@@ -160,7 +169,8 @@ class TrajectoryPredictor:
             'lane_connectors': lane_connector_polylines
         }
 
-    def get_polygons_around_agent(self, global_pose: Tuple[float, float, float], map_api: NuScenesMap, radius) -> Dict:
+    def get_polygons_around_agent(self, global_pose: Tuple[float, float, float], map_api: NuScenesMap, radius, 
+                                  layer_names = ['stop_line', 'ped_crossing']) -> Dict:
         """
         Gets polygon layers around the target agent e.g. crosswalks, stop lines
         :param global_pose: (x, y, yaw) or target agent in global co-ordinates
@@ -168,7 +178,7 @@ class TrajectoryPredictor:
         :return polygons: Dictionary of polygon layers, each type as a list of shapely Polygons
         """
         x, y, _ = global_pose
-        record_tokens = map_api.get_records_in_radius(x, y, radius, ['stop_line', 'ped_crossing'])
+        record_tokens = map_api.get_records_in_radius(x, y, radius, layer_names)
         polygons = {k: [] for k in record_tokens.keys()}
         for k, v in record_tokens.items():
             for record_token in v:
@@ -192,7 +202,6 @@ class TrajectoryPredictor:
         lanes = [v for k, v in lanes.items()]
         # Get flags indicating whether a lane lies on stop lines or crosswalks
         lane_flags = self.get_lane_flags(lanes, polygons)
-
         # Convert lane polylines to local coordinates:
         lanes = [np.asarray([self.global_to_local(origin, pose) for pose in lane]) for lane in lanes]
 
@@ -360,11 +369,11 @@ class TrajectoryPredictor:
         local_y = global_y - origin_y
 
         # Rotate
-        global_yaw = correct_yaw(global_yaw)
+        # global_yaw = -np.pi - global_yaw if global_yaw <= 0 else np.pi - global_yaw # global to map
         theta = np.arctan2(-np.sin(global_yaw-origin_yaw), np.cos(global_yaw-origin_yaw))
 
-        r = np.asarray([[np.cos(np.pi/2 - origin_yaw), np.sin(np.pi/2 - origin_yaw)],
-                        [-np.sin(np.pi/2 - origin_yaw), np.cos(np.pi/2 - origin_yaw)]])
+        r = np.asarray([[np.cos(origin_yaw), np.sin(origin_yaw)],
+                        [-np.sin(origin_yaw), np.cos(origin_yaw)]])
         local_x, local_y = np.matmul(r, np.asarray([local_x, local_y]).transpose())
 
         local_pose = (local_x, local_y, theta)
