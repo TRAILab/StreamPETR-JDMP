@@ -37,7 +37,6 @@ class TrajectoryPredictor:
 
         # Generate map representation
         lane_node_feats, lane_ids = self.get_lane_node_feats(global_pose, lanes, polygons)
-        print('total lane nodes before topk: ', len(lane_node_feats))
         lane_node_feats, lane_ids = self.topk_lane_poses(lane_node_feats, lane_ids, self.max_nodes)
         e_succ = self.get_successor_edges(lane_ids, nusc_map)        
         lane_node_feats = self.add_boundary_flag(e_succ, lane_node_feats)

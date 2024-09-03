@@ -329,9 +329,9 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.with_ego_pos:
             self.ego_pose_pe = MLN(180)
             self.ego_pose_memory = MLN(180)
-            if self.forecast_emb_sep:
-                self.forecast_ego_pose_pe = MLN(180)
-                self.forecast_ego_pose_memory = MLN(180)
+        if self.forecast_emb_sep:
+            self.forecast_ego_pose_pe = MLN(180)
+            self.forecast_ego_pose_memory = MLN(180)
 
         # Map encoder
         if self.with_map_encoder:
@@ -525,17 +525,15 @@ class JDMPPETRHead(AnchorFreeHead):
         else:
             temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
-        B = temp_pos.size(0)
-        
-        if self.with_ego_pos:
-            memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
-            memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
-            if self.forecast_emb_sep:
-                temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
-                temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
-            else:
-                temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
-                temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
+    
+        memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
+        memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
+        if self.forecast_emb_sep:
+            temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
+            temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
+        else:
+            temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
+            temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
 
         if self.forecast_emb_sep:
             temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
