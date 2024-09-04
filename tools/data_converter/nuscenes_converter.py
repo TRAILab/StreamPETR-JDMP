@@ -282,6 +282,12 @@ def _fill_trainval_infos(nusc,
             forecasting_length = 13 # 6 seconds + current frame
             fboxes, fmasks, ftypes = get_forecasting_annotations(nusc, annotations, forecasting_length)
             locs = [np.array([b.center for b in boxes]).reshape(-1, 3) for boxes in fboxes]
+            wlhs = [np.array([b.wlh for b in boxes]).reshape(-1, 3) for boxes in fboxes]
+            yaws = [np.array([b.orientation.yaw_pitch_roll[0] for b in boxes]).reshape(-1, 1) for boxes in fboxes]
+            vels = [np.array([b.velocity[:2] for b in boxes]).reshape(-1, 2) for boxes in fboxes]
+            fboxes = [np.concatenate([loc, wlh[:, [1, 0, 2]], yaw], axis=1) for loc, wlh, yaw in zip(locs, wlhs, yaws)]
+            info['gt_forecasting_boxes'] = np.array(fboxes)
+            info['gt_forecasting_velocity'] = np.array(vels)
             info['gt_forecasting_locs'] = np.array(locs)
             info['gt_forecasting_masks'] = np.array(fmasks)
             info['gt_forecasting_types'] = np.array(ftypes)

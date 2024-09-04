@@ -329,9 +329,12 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.with_ego_pos:
             self.ego_pose_pe = MLN(180)
             self.ego_pose_memory = MLN(180)
-            if self.forecast_emb_sep:
-                self.forecast_ego_pose_pe = MLN(180)
-                self.forecast_ego_pose_memory = MLN(180)
+        if self.forecast_emb_sep:
+            self.forecast_ego_pose_pe = MLN(180)
+            self.forecast_ego_pose_memory = MLN(180)
+        if not self.with_ego_pos and not self.forecast_emb_sep:
+            self.ego_pose_pe = MLN(180)
+            self.ego_pose_memory = MLN(180)
 
         # Map encoder
         if self.with_map_encoder:
