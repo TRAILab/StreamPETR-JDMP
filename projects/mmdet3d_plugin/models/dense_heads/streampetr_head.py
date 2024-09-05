@@ -719,7 +719,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         num_future_frames = 12
         rec_reference_points = transform_reference_points(rec_reference_points, data['ego_pose'], reverse=False)
-        breakpoint()
+        # TODO: Implement matching here
         rec_velo = self.transform_velocity(rec_velo, data['ego_pose'])
         all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1)
         # will change to agent centric frame in evaluation
@@ -727,6 +727,7 @@ class StreamPETRHead(AnchorFreeHead):
         for i in range(1, num_future_frames + 1):
             all_forecast_preds[..., i, :] = all_forecast_preds[..., i - 1, :] + rec_velo * 0.5
         outs['all_forecast_preds'] = all_forecast_preds
+        
         return outs
     
     def prepare_for_loss(self, mask_dict):

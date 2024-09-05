@@ -229,9 +229,14 @@ def main():
             model.cuda(),
             device_ids=[torch.cuda.current_device()],
             broadcast_buffers=False)
-        outputs, all_forecast_preds = custom_multi_gpu_test(model, data_loader, args.tmpdir,
+        outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
                                         args.gpu_collect)
-        breakpoint()
+        import pickle
+        forecast_results = outputs['forecast_preds_results']
+        with open('forecast_preds.pkl', 'wb') as f:
+            pickle.dump(forecast_results, f)
+        # remove forecast preds from outputs
+        outputs.pop('forecast_preds_results', None)
 
     rank, _ = get_dist_info()
     if rank == 0:
