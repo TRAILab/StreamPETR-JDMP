@@ -10,6 +10,7 @@ from mmcv.parallel import DataContainer as DC
 from mmdet3d.core.points import BasePoints
 from mmdet.datasets.pipelines import to_tensor
 from mmdet3d.datasets.pipelines import DefaultFormatBundle
+from mmdet3d.core.bbox import BaseInstance3DBoxes
 
 @PIPELINES.register_module()
 class PETRFormatBundle3D(DefaultFormatBundle):
@@ -139,7 +140,12 @@ class JDMPFormatBundle3D(PETRFormatBundle3D):
             dict: The result dict contains the data that is formatted with
                 default bundle.
         """
-        for key in ['gt_forecasting_locs', 'gt_forecasting_masks']:
+        results['gt_forecasting_bboxes_3d'] = results['gt_forecasting_bboxes_3d'].tensor
+        n_obj = results['gt_forecasting_masks'].shape[0]
+        n_len = results['gt_forecasting_masks'].shape[1]
+        n_states = results['gt_forecasting_bboxes_3d'].shape[-1]
+        results['gt_forecasting_bboxes_3d'] = results['gt_forecasting_bboxes_3d'].reshape(n_obj, n_len, n_states)
+        for key in ['gt_forecasting_masks']:
             if key in results:
                 if isinstance(results[key], list):
                     results[key] = DC([to_tensor(res) for res in results[key]])

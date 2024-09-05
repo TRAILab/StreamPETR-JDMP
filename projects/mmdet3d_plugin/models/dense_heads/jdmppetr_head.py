@@ -271,7 +271,7 @@ class JDMPPETRHead(AnchorFreeHead):
         for _ in range(self.num_reg_fcs):
             forecast_reg_branch.append(Linear(self.embed_dims, self.embed_dims))
             forecast_reg_branch.append(nn.ReLU())
-        forecast_reg_branch.append(Linear(self.embed_dims, 3))
+        forecast_reg_branch.append(Linear(self.embed_dims, self.code_size))
         forecast_reg_branch = nn.Sequential(*forecast_reg_branch)
 
         self.cls_branches = nn.ModuleList(
@@ -964,7 +964,7 @@ class JDMPPETRHead(AnchorFreeHead):
             outs = {
                 'all_cls_scores': all_cls_scores,
                 'all_bbox_preds': all_bbox_preds,
-                'dn_mask_dict':None,
+                'dn_mask_dict': None,
             }
         outs['all_forecast_preds'] = all_forecast_preds
 
@@ -995,7 +995,7 @@ class JDMPPETRHead(AnchorFreeHead):
                            forecast_pred,
                            gt_labels,
                            gt_bboxes,
-                           gt_forecasting_locs, 
+                           gt_forecasting_bboxes_3d, 
                            gt_forecasting_masks,
                            gt_bboxes_ignore=None):
         """"Compute regression and classification targets for one image.
@@ -1069,10 +1069,10 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # forecast targets
         forecast_weights = torch.zeros_like(forecast_pred)
-        forecast_targets = torch.zeros_like(forecast_pred)
+        forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
         forecast_indices = [1]
         if sampling_result.num_gts > 0:
-            forecast_targets[matched_pred_inds] = gt_forecasting_locs[matched_gt_inds, forecast_indices].float()
+            forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, forecast_indices].float()
             forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds, forecast_indices].float().unsqueeze(-1)
         return (labels, label_weights, bbox_targets, bbox_weights, 
                 forecast_targets, forecast_weights, pos_inds, neg_inds)
@@ -1083,7 +1083,7 @@ class JDMPPETRHead(AnchorFreeHead):
                     forecast_preds_list,
                     gt_bboxes_list,
                     gt_labels_list,
-                    gt_forecasting_locs_list, 
+                    gt_forecasting_bboxes_3d_list, 
                     gt_forecasting_masks_list,
                     gt_bboxes_ignore_list=None):
         """"Compute regression and classification targets for a batch image.
@@ -1127,7 +1127,7 @@ class JDMPPETRHead(AnchorFreeHead):
          pos_inds_list, neg_inds_list) = multi_apply(
              self._get_target_single, cls_scores_list, bbox_preds_list, forecast_preds_list,
              gt_labels_list, gt_bboxes_list, 
-             gt_forecasting_locs_list, gt_forecasting_masks_list,
+             gt_forecasting_bboxes_3d_list, gt_forecasting_masks_list,
              gt_bboxes_ignore_list)
         num_total_pos = sum((inds.numel() for inds in pos_inds_list))
         num_total_neg = sum((inds.numel() for inds in neg_inds_list))
@@ -1141,7 +1141,7 @@ class JDMPPETRHead(AnchorFreeHead):
                     forecast_preds,
                     gt_bboxes_list,
                     gt_labels_list,
-                    gt_forecasting_locs, 
+                    gt_forecasting_bboxes_3d, 
                     gt_forecasting_masks,
                     gt_bboxes_ignore_list=None):
         """"Loss function for outputs from a single decoder layer of a single
@@ -1168,7 +1168,7 @@ class JDMPPETRHead(AnchorFreeHead):
         forecast_preds_list = [forecast_preds[i] for i in range(num_imgs)]
         cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, forecast_preds_list,
                                            gt_bboxes_list, gt_labels_list,
-                                           gt_forecasting_locs, gt_forecasting_masks,
+                                           gt_forecasting_bboxes_3d, gt_forecasting_masks,
                                            gt_bboxes_ignore_list)
         (labels_list, label_weights_list, bbox_targets_list, bbox_weights_list,
          forecast_targets_list, forecast_weights_list, 
@@ -1284,7 +1284,7 @@ class JDMPPETRHead(AnchorFreeHead):
     def loss(self,
              gt_bboxes_list,
              gt_labels_list,
-             gt_forecasting_locs, 
+             gt_forecasting_bboxes_3d, 
              gt_forecasting_masks,
              preds_dicts,
              gt_bboxes_ignore=None):
@@ -1333,8 +1333,8 @@ class JDMPPETRHead(AnchorFreeHead):
         all_gt_bboxes_ignore_list = [
             gt_bboxes_ignore for _ in range(num_dec_layers)
         ]
-        all_gt_forecasting_locs = [
-            gt_forecasting_locs for _ in range(num_dec_layers)
+        all_gt_forecasting_bboxes_3d = [
+            gt_forecasting_bboxes_3d for _ in range(num_dec_layers)
         ]
         all_gt_forecasting_masks = [
             gt_forecasting_masks for _ in range(num_dec_layers)
@@ -1343,7 +1343,7 @@ class JDMPPETRHead(AnchorFreeHead):
         losses_cls, losses_bbox, losses_forecast = multi_apply(
             self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_preds,
             all_gt_bboxes_list, all_gt_labels_list,
-            all_gt_forecasting_locs, all_gt_forecasting_masks,
+            all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
             all_gt_bboxes_ignore_list)
 
         loss_dict = dict()

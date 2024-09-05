@@ -328,17 +328,18 @@ class GlobalRotScaleTransImage():
         self._rotate_bev_along_z(results, rot_angle)
         if self.reverse_angle:
             rot_angle = rot_angle * -1
-        results["gt_bboxes_3d"].rotate(
-            np.array(rot_angle)
-        )  
+        results["gt_bboxes_3d"].rotate(np.array(rot_angle))  
+        results["gt_forecasting_bboxes_3d"].rotate(np.array(rot_angle))
 
         # random scale
         self._scale_xyz(results, scale_ratio)
         results["gt_bboxes_3d"].scale(scale_ratio)
+        results["gt_forecasting_bboxes_3d"].scale(scale_ratio)
 
-        #random translate
+        # random translate
         self._trans_xyz(results, trans)
         results["gt_bboxes_3d"].translate(trans)
+        results["gt_forecasting_bboxes_3d"].translate(trans)
 
         return results
 
@@ -416,17 +417,22 @@ class JDMPObjectRangeFilter(object):
             bev_range = self.pcd_range[[0, 2, 3, 5]]
 
         gt_bboxes_3d = input_dict['gt_bboxes_3d']
+        gt_forecasting_bboxes_3d = input_dict['gt_forecasting_bboxes_3d']
+        forecast_len = gt_forecasting_bboxes_3d.tensor.shape[0] // gt_bboxes_3d.tensor.shape[0]
         mask = gt_bboxes_3d.in_range_bev(bev_range)
         gt_bboxes_3d = gt_bboxes_3d[mask]
+        forecast_mask = torch.repeat_interleave(mask, forecast_len)
+        gt_forecasting_bboxes_3d = gt_forecasting_bboxes_3d[forecast_mask]
         # limit rad to [-pi, pi]
         gt_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
+        gt_forecasting_bboxes_3d.limit_yaw(offset=0.5, period=2 * np.pi)
         input_dict['gt_bboxes_3d'] = gt_bboxes_3d
+        input_dict['gt_forecasting_bboxes_3d'] = gt_forecasting_bboxes_3d
         # mask is a torch tensor but gt_labels_3d is still numpy array
         # using mask to index gt_labels_3d will cause bug when
         # len(gt_labels_3d) == 1, where mask=1 will be interpreted
         # as gt_labels_3d[1] and cause out of index error
-        for key in ['gt_labels_3d',
-                    'gt_forecasting_locs', 'gt_forecasting_masks']:
+        for key in ['gt_labels_3d', 'gt_forecasting_masks']:
             input_dict[key] = input_dict[key][mask.numpy().astype(np.bool)]
 
         return input_dict
@@ -463,9 +469,12 @@ class JDMPObjectNameFilter(object):
         gt_labels_3d = input_dict['gt_labels_3d']
         gt_bboxes_mask = np.array([n in self.labels for n in gt_labels_3d],
                                   dtype=np.bool_)
-        for key in ['gt_bboxes_3d', 'gt_labels_3d',
-                    'gt_forecasting_locs', 'gt_forecasting_masks']:
+        for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_forecasting_masks']:
             input_dict[key] = input_dict[key][gt_bboxes_mask]
+        forecast_len = input_dict['gt_forecasting_bboxes_3d'].tensor.shape[0] // input_dict['gt_bboxes_3d'].tensor.shape[0]
+        gt_bboxes_mask = torch.tensor(gt_bboxes_mask)
+        forecast_mask = torch.repeat_interleave(gt_bboxes_mask, forecast_len)
+        input_dict['gt_forecasting_bboxes_3d'] = input_dict['gt_forecasting_bboxes_3d'][forecast_mask]
 
         return input_dict
 
