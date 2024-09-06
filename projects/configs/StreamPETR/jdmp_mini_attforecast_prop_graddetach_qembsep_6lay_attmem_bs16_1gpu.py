@@ -103,7 +103,6 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
-        forecast_emb_sep=True,
         forecast_mem_update=True,
         with_position=True,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
@@ -132,27 +131,6 @@ model = dict(
                     ffn_dropout=0.1,
                     with_cp=True,  ###use checkpoint to save memory
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
-                                     'ffn', 'norm')),
-            )),
-        forecast_transformer=dict(
-            type='JDMPTemporalTransformer',
-            decoder=dict(
-                type='PETRTransformerDecoder',
-                return_intermediate=True,
-                num_layers=6,
-                transformerlayers=dict(
-                    type='PETRTemporalDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=256,
-                            num_heads=8,
-                            dropout=0.1),
-                        ],
-                    feedforward_channels=2048,
-                    ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
-                    operation_order=('self_attn', 'norm',
                                      'ffn', 'norm')),
             )),
         bbox_coder=dict(
