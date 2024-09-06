@@ -2,4 +2,8 @@ __pycache__/
 ckpts/
 data/
 output/
+output_home
 wandb/
+artifacts/
+*.sif
+*.deb
