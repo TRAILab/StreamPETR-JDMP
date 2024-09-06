@@ -13,6 +13,7 @@ import numpy as np
 from mmdet.datasets import DATASETS
 from mmdet3d.datasets import NuScenesDataset
 from mmdet.datasets import DATASETS
+from mmdet3d.core.bbox import LiDARInstance3DBoxes
 import torch
 import numpy as np
 from nuscenes.eval.common.utils import Quaternion
@@ -136,7 +137,8 @@ class CustomNuScenesDataset(NuScenesDataset):
             else:
                 queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
         if not self.test_mode:
-            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths']:
+            for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_bboxes', 'gt_labels', 'centers2d', 
+                        'depths', 'gt_forecasting_bboxes_3d', 'gt_forecasting_masks']:
                 if key == 'gt_bboxes_3d':
                     queue[-1][key] = DC([each[key].data for each in queue], cpu_only=True)
                 else:
@@ -236,6 +238,27 @@ class CustomNuScenesDataset(NuScenesDataset):
                     depths=info['depths'],
                     bboxes_ignore=info['bboxes_ignore'])
             )
+            # Work around for modifying get_ann_info
+            if self.use_valid_flag:
+                mask = info['valid_flag']
+            else:
+                mask = info['num_lidar_pts'] > 0
+            gt_forecasting_bboxes_3d = info['gt_forecasting_boxes'][mask]
+            if self.with_velocity:
+                gt_forecasting_velocity = info['gt_forecasting_velocity'][mask]
+                nan_mask = np.isnan(gt_forecasting_velocity[:, :, 0])
+                gt_forecasting_velocity[nan_mask] = [0.0, 0.0]
+                gt_forecasting_bboxes_3d = np.concatenate([gt_forecasting_bboxes_3d, gt_forecasting_velocity], axis=-1)
+            # Stack all trajectories together
+            gt_forecasting_bboxes_3d = gt_forecasting_bboxes_3d.reshape(-1, gt_forecasting_bboxes_3d.shape[-1])
+            # the nuscenes box center is [0.5, 0.5, 0.5], we change it to be
+            # the same as KITTI (0.5, 0.5, 0)
+            gt_forecasting_bboxes_3d = LiDARInstance3DBoxes(
+                gt_forecasting_bboxes_3d,
+                box_dim=gt_forecasting_bboxes_3d.shape[-1],
+                origin=(0.5, 0.5, 0.5)).convert_to(self.box_mode_3d)
+            annos.update(dict(gt_forecasting_bboxes_3d=gt_forecasting_bboxes_3d))
+            annos.update(dict(gt_forecasting_masks=info['gt_forecasting_masks'][mask]))
             input_dict['ann_info'] = annos
             
         return input_dict

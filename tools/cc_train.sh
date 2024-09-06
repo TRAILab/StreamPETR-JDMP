@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmp_baseline_bs16_1gpu    # Job name
+#SBATCH --job-name=train_jdmp_mini_attforecast_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
@@ -14,7 +14,7 @@
 SERVER=narval
 DATASET=nuscenes
 NUM_GPUS=1
-CFG_NAME=jdmp_baseline_bs16_1gpu
+CFG_NAME=jdmp_mini_attforecast_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e
 
 # Host paths
 HOME_DIR=/home/spapais
