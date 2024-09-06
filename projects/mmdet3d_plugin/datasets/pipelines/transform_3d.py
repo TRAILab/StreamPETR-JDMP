@@ -418,7 +418,7 @@ class JDMPObjectRangeFilter(object):
 
         gt_bboxes_3d = input_dict['gt_bboxes_3d']
         gt_forecasting_bboxes_3d = input_dict['gt_forecasting_bboxes_3d']
-        forecast_len = gt_forecasting_bboxes_3d.tensor.shape[0] // gt_bboxes_3d.tensor.shape[0]
+        forecast_len = 13 # TODO: config
         mask = gt_bboxes_3d.in_range_bev(bev_range)
         gt_bboxes_3d = gt_bboxes_3d[mask]
         forecast_mask = torch.repeat_interleave(mask, forecast_len)
@@ -471,8 +471,8 @@ class JDMPObjectNameFilter(object):
                                   dtype=np.bool_)
         for key in ['gt_bboxes_3d', 'gt_labels_3d', 'gt_forecasting_masks']:
             input_dict[key] = input_dict[key][gt_bboxes_mask]
-        forecast_len = input_dict['gt_forecasting_bboxes_3d'].tensor.shape[0] // input_dict['gt_bboxes_3d'].tensor.shape[0]
         gt_bboxes_mask = torch.tensor(gt_bboxes_mask)
+        forecast_len = 13 # TODO: config
         forecast_mask = torch.repeat_interleave(gt_bboxes_mask, forecast_len)
         input_dict['gt_forecasting_bboxes_3d'] = input_dict['gt_forecasting_bboxes_3d'][forecast_mask]
 

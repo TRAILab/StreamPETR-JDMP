@@ -141,11 +141,12 @@ class JDMPFormatBundle3D(PETRFormatBundle3D):
                 default bundle.
         """
         results['gt_forecasting_bboxes_3d'] = results['gt_forecasting_bboxes_3d'].tensor
-        n_obj = results['gt_forecasting_masks'].shape[0]
-        n_len = results['gt_forecasting_masks'].shape[1]
-        n_states = results['gt_forecasting_bboxes_3d'].shape[-1]
-        results['gt_forecasting_bboxes_3d'] = results['gt_forecasting_bboxes_3d'].reshape(n_obj, n_len, n_states)
-        for key in ['gt_forecasting_masks']:
+        if results['gt_forecasting_bboxes_3d'].nelement() != 0:
+            n_obj = results['gt_forecasting_masks'].shape[0]
+            n_len = results['gt_forecasting_masks'].shape[1]
+            n_states = results['gt_forecasting_bboxes_3d'].shape[-1]
+            results['gt_forecasting_bboxes_3d'] = results['gt_forecasting_bboxes_3d'].reshape(n_obj, n_len, n_states)
+        for key in ['gt_forecasting_masks', 'gt_forecasting_bboxes_3d']:
             if key in results:
                 if isinstance(results[key], list):
                     results[key] = DC([to_tensor(res) for res in results[key]])
