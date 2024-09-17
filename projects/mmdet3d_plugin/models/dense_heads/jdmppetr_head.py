@@ -976,7 +976,7 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
             all_forecast_preds = rec_reference_points + rec_velo * 0.5
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
-            forecast_points = all_forecast_preds[-1].detach()
+            forecast_points = all_forecast_preds[-1][...,:3].detach()
             self.memory_reference_point[:, :self.num_propagated] = forecast_points
             # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
