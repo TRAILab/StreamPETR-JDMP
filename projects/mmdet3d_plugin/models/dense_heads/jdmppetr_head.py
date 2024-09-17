@@ -958,10 +958,6 @@ class JDMPPETRHead(AnchorFreeHead):
 
             all_forecast_preds = torch.stack(outputs_forecast_coords)
             all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
-            if self.forecast_mem_update:
-                forecast_points = all_forecast_preds[..., :3][-1].detach()
-                self.memory_reference_point[:, :forecast_points.size(1)] = forecast_points
-                # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
         elif self.with_velo_forecast:
             if self.training and mask_dict and mask_dict['pad_size'] > 0:
@@ -973,10 +969,16 @@ class JDMPPETRHead(AnchorFreeHead):
                 rec_velo = all_bbox_preds[..., -2:]
                 rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
             _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
-            rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes)
-            rec_velo = torch.gather(rec_velo, 2, topk_indexes)
-
-            all_forecast_preds = rec_reference_points + torch.nn.functional.pad(rec_velo, (0,1)) * 0.5
+            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
+            rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
+            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
+            rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
+            rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
+            all_forecast_preds = rec_reference_points + rec_velo * 0.5
+        if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
+            forecast_points = all_forecast_preds[-1].detach()
+            self.memory_reference_point[:, :self.num_propagated] = forecast_points
+            # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
@@ -1099,8 +1101,8 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # forecast targets
         code_size = gt_forecasting_bboxes_3d.size(-1)
-        if forecast_pred.size(-1) == 2:
-            code_size = 2
+        if forecast_pred.size(-1) == 3:
+            code_size = 3
         forecast_weights = torch.zeros_like(forecast_pred)
         forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
         forecast_indices = [1]
