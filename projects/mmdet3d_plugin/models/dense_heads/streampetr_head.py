@@ -420,7 +420,10 @@ class StreamPETRHead(AnchorFreeHead):
     def temporal_alignment(self, query_pos, tgt, reference_points):
         B = query_pos.size(0)
 
-        prop_mem_ref_point = self.memory_reference_point + torch.nn.functional.pad(self.memory_velo, (0,1)) * self.memory_timestamp.float()
+        prop_timestep = self.memory_timestamp.clone()
+        prop_timestep[:, :self.num_propagated] = 0
+        prop_mem_ref_point = self.memory_reference_point.clone() 
+        prop_mem_ref_point[:, :self.num_propagated] += torch.nn.functional.pad(self.memory_velo[:, :self.num_propagated], (0,1)) * self.memory_timestamp[:, :self.num_propagated].float()
         temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
@@ -431,13 +434,13 @@ class StreamPETRHead(AnchorFreeHead):
             rec_ego_motion = nerf_positional_encoding(rec_ego_motion)
             tgt = self.ego_pose_memory(tgt, rec_ego_motion)
             query_pos = self.ego_pose_pe(query_pos, rec_ego_motion)
-            memory_ego_motion = torch.cat([self.memory_velo, self.memory_timestamp, self.memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
+            memory_ego_motion = torch.cat([self.memory_velo, prop_timestep, self.memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
             memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
             temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
             temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
 
         query_pos += self.time_embedding(pos2posemb1d(torch.zeros_like(reference_points[...,:1])))
-        temp_pos += self.time_embedding(pos2posemb1d(self.memory_timestamp).float())
+        temp_pos += self.time_embedding(pos2posemb1d(prop_timestep).float())
 
         if self.num_propagated > 0:
             tgt = torch.cat([tgt, temp_memory[:, :self.num_propagated]], dim=1)
