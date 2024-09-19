@@ -14,9 +14,9 @@ OUTPUT_DIR=$PROJ_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
-CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
-MODEL_CKPT=/proj/output/$CONFIG_NAME/iter_19338.pth
-EVAL_OPT=jsonfile_prefix=/proj/output/$CONFIG_NAME/iter_19338
+MODEL_CKPT=/proj/output/$CONFIG_NAME/latest.pth
+WRK_DIR=/proj/output/$CONFIG_NAME
+EVAL_OPT=jsonfile_prefix=/proj/output/$CONFIG_NAME
 
 VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/samples:/proj/data/nuscenes/samples
