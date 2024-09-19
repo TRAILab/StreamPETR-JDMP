@@ -42,7 +42,7 @@ BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --ev
 # done
 # BASE_CMD="${BASE_CMD}'"
 
-CONTAINER_CMD="docker run -d --ipc host --gpus $GPUS -w /proj/
+CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"
 $VOLUMES
 $DOCKER_IMG
