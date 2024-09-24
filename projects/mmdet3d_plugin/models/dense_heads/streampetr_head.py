@@ -563,8 +563,8 @@ class StreamPETRHead(AnchorFreeHead):
               self)._load_from_state_dict(state_dict, prefix, local_metadata,
                                           strict, missing_keys,
                                           unexpected_keys, error_msgs)
-    
-    
+
+
     def forward(self, memory_center, img_metas, topk_indexes=None,  **data):
         """Forward function.
         Args:
@@ -648,7 +648,7 @@ class StreamPETRHead(AnchorFreeHead):
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict':None,
             }
-        
+
         # Constant velocity forecast
         if self.with_velo_forecast:
             if self.training and mask_dict and mask_dict['pad_size'] > 0:
@@ -662,7 +662,7 @@ class StreamPETRHead(AnchorFreeHead):
             all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) + \
                 rec_velo.unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) * pred_dts
             outs['all_forecast_preds'] = all_forecast_preds
-        
+
         return outs
     
     def prepare_for_loss(self, mask_dict):

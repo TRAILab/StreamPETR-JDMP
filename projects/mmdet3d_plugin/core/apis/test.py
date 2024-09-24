@@ -22,7 +22,6 @@ import mmcv
 import numpy as np
 import pycocotools.mask as mask_util
 
-
 def custom_encode_mask_results(mask_results):
     """Encode bitmap mask to RLE code. Semantic Masks only
     Args:
@@ -57,7 +56,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             different gpus under cpu mode.
         gpu_collect (bool): Option to use either gpu or cpu to collect results.
     Returns:
-        dict: The prediction results including bbox, mask, and forecast preds.
+        results (dict(list)): The prediction results including bbox, mask, and forecast preds.
     """
     model.eval()
     bbox_results = []
@@ -92,6 +91,10 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
                 batch_size = len(result)
                 bbox_results.extend(result)
 
+            #if isinstance(result[0], tuple):
+            #    assert False, 'this code is for instance segmentation, which our code will not utilize.'
+            #    result = [(bbox_results, encode_mask_results(mask_results))
+            #              for bbox_results, mask_results in result]
         if rank == 0:
             for _ in range(batch_size * world_size):
                 prog_bar.update()
