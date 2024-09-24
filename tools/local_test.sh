@@ -3,20 +3,21 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=stream_petr_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
+CONFIG_NAME=stream_petr_mini_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
 HOME_DIR=/home/trail/workspace
-PROJ_DIR=$HOME_DIR/StreamPETR
+PROJ_DIR=$HOME_DIR/StreamPETR-JDMP
 DATA_DIR=/data/sets/nuscenes
-OUTPUT_DIR=$HOME_DIR/output
+OUTPUT_DIR=$PROJ_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
 CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
-MODEL_CKPT=/proj/output/$CONFIG_NAME/$CONFIG_NAME.pth
+MODEL_CKPT=/proj/output/$CONFIG_NAME/latest.pth
 WRK_DIR=/proj/output/$CONFIG_NAME
+EVAL_OPT=jsonfile_prefix=/proj/output/$CONFIG_NAME
 
 VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/samples:/proj/data/nuscenes/samples
@@ -30,9 +31,9 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 
 DATE_TIME=$(date +"%Y%m%d_%H%M%S")
 
-BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox"
+BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox forecast --eval-options '$EVAL_OPT'"
 
-CONTAINER_CMD="docker run -d --ipc host --gpus $GPUS -w /proj/
+CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"
 $VOLUMES
 $DOCKER_IMG

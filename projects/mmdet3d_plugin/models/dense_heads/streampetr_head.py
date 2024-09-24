@@ -71,6 +71,7 @@ class StreamPETRHead(AnchorFreeHead):
                  num_propagated=256,
                  with_dn=True,
                  with_ego_pos=True,
+                 with_velo_forecast=False,
                  match_with_velo=True,
                  match_costs=None,
                  transformer=None,
@@ -165,6 +166,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.num_propagated = num_propagated
         self.with_dn = with_dn
         self.with_ego_pos = with_ego_pos
+        self.with_velo_forecast = with_velo_forecast
         self.match_with_velo = match_with_velo
         self.num_reg_fcs = num_reg_fcs
         self.train_cfg = train_cfg
@@ -400,12 +402,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         coords = coords.unsqueeze(-1)
 
-        # img2lidars = data['lidar2img'].inverse()
-        # Assuming data['lidar2img'] is on the GPU
-        lidar2img = data['lidar2img'].cpu()  # Step 1: Move to CPU
-        img2lidars = torch.inverse(lidar2img)  # Step 2: Invert the matrix
-        img2lidars = img2lidars.cuda()  # Step 3: Move the result back to the GPU
-
+        img2lidars = data['lidar2img'].inverse()
         img2lidars = img2lidars.view(BN, 1, 1, 4, 4).repeat(1, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
         img2lidars = topk_gather(img2lidars, topk_indexes)
 
@@ -423,39 +420,9 @@ class StreamPETRHead(AnchorFreeHead):
         return coords_position_embeding, cone
 
     def temporal_alignment(self, query_pos, tgt, reference_points):
-        # B = query_pos.size(0)
-
-        # temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-        # temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
-        # temp_memory = self.memory_embedding
-        # rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
-        
-        # if self.with_ego_pos:
-        #     rec_ego_motion = torch.cat([torch.zeros_like(reference_points[...,:3]), rec_ego_pose[..., :3, :].flatten(-2)], dim=-1)
-        #     rec_ego_motion = nerf_positional_encoding(rec_ego_motion)
-        #     tgt = self.ego_pose_memory(tgt, rec_ego_motion)
-        #     query_pos = self.ego_pose_pe(query_pos, rec_ego_motion)
-        #     memory_ego_motion = torch.cat([self.memory_velo, self.memory_timestamp, self.memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
-        #     memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
-        #     temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
-        #     temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
-
-        # query_pos += self.time_embedding(pos2posemb1d(torch.zeros_like(reference_points[...,:1])))
-        # temp_pos += self.time_embedding(pos2posemb1d(self.memory_timestamp).float())
-
-        # if self.num_propagated > 0:
-        #     tgt = torch.cat([tgt, temp_memory[:, :self.num_propagated]], dim=1)
-        #     query_pos = torch.cat([query_pos, temp_pos[:, :self.num_propagated]], dim=1)
-        #     reference_points = torch.cat([reference_points, temp_reference_point[:, :self.num_propagated]], dim=1)
-        #     rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.shape[1]+self.num_propagated, 1, 1)
-        #     temp_memory = temp_memory[:, self.num_propagated:]
-        #     temp_pos = temp_pos[:, self.num_propagated:]
-            
-        # return tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose
         B = query_pos.size(0)
 
-        prop_mem_ref_point = self.memory_reference_point + torch.nn.functional.pad(self.memory_velo, (0,1)) * self.memory_timestamp.float()
-        temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
@@ -597,33 +564,6 @@ class StreamPETRHead(AnchorFreeHead):
                                           strict, missing_keys,
                                           unexpected_keys, error_msgs)
     
-    def transform_velocity(self, velocity, ego_pose):
-        """
-        Rotates the velocity vectors from the local (agent-centric) frame to the global frame.
-        
-        Args:
-            velocity (Tensor): The velocity tensor of shape [B, num_objects, 2] 
-                            where the last dimension contains vx, vy.
-            ego_pose (Tensor): The ego pose tensor of shape [B, 4, 4], where the rotation 
-                            can be extracted (specifically the yaw angle).
-        
-        Returns:
-            Tensor: Transformed velocity tensor in the global frame, of shape [B, num_objects, 2].
-        """
-        # Extract the yaw angle from the ego pose
-        yaw = torch.atan2(ego_pose[:, 1, 0], ego_pose[:, 0, 0])  # Shape: [B]
-
-        # Create the rotation matrix for the yaw angle
-        cos_yaw = torch.cos(yaw)
-        sin_yaw = torch.sin(yaw)
-        
-        # Rotation matrix for each batch
-        rotation_matrix = torch.stack([cos_yaw, -sin_yaw, sin_yaw, cos_yaw], dim=-1).view(-1, 2, 2)  # Shape: [B, 2, 2]
-
-        # Transform the velocity using the rotation matrix
-        transformed_velocity = torch.bmm(velocity, rotation_matrix.transpose(1, 2))  # Shape: [B, num_objects, 2]
-
-        return transformed_velocity
     
     def forward(self, memory_center, img_metas, topk_indexes=None,  **data):
         """Forward function.
@@ -709,24 +649,19 @@ class StreamPETRHead(AnchorFreeHead):
                 'dn_mask_dict':None,
             }
         
-        # Add to the end of forward method
-        if self.training and mask_dict and mask_dict['pad_size'] > 0:
-            rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
-            rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:][-1]
-        else:
-            rec_reference_points = all_bbox_preds[..., :3][-1]
-            rec_velo = all_bbox_preds[..., -2:][-1]
-
-        num_future_frames = 12
-        rec_reference_points = transform_reference_points(rec_reference_points, data['ego_pose'], reverse=False)
-        # TODO: Implement matching here
-        rec_velo = self.transform_velocity(rec_velo, data['ego_pose'])
-        all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1)
-        # will change to agent centric frame in evaluation
-        # constant velocity propagation
-        for i in range(1, num_future_frames + 1):
-            all_forecast_preds[..., i, :] = all_forecast_preds[..., i - 1, :] + rec_velo * 0.5
-        outs['all_forecast_preds'] = all_forecast_preds
+        # Constant velocity forecast
+        if self.with_velo_forecast:
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
+                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:][-1]
+            else:
+                rec_reference_points = all_bbox_preds[..., :3][-1]
+                rec_velo = all_bbox_preds[..., -2:][-1]
+            num_future_frames = 12
+            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) + \
+                rec_velo.unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) * pred_dts
+            outs['all_forecast_preds'] = all_forecast_preds
         
         return outs
     
@@ -1116,4 +1051,16 @@ class StreamPETRHead(AnchorFreeHead):
             scores = preds['scores']
             labels = preds['labels']
             ret_list.append([bboxes, scores, labels])
+        return ret_list
+
+    @force_fp32(apply_to=('preds_dicts'))
+    def get_forecasts(self, preds_dicts):
+        """Generate bboxes from bbox head predictions.
+        Args:
+            preds_dicts (tuple[list[dict]]): Prediction results.
+            img_metas (list[dict]): Point cloud and image's meta info.
+        Returns:
+            list[dict]: Decoded bbox, scores and labels after nms.
+        """
+        ret_list = preds_dicts['all_forecast_preds'] if 'all_forecast_preds' in preds_dicts else None
         return ret_list

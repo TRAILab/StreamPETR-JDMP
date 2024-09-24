@@ -231,12 +231,6 @@ def main():
             broadcast_buffers=False)
         outputs = custom_multi_gpu_test(model, data_loader, args.tmpdir,
                                         args.gpu_collect)
-        import pickle
-        forecast_results = outputs['forecast_preds_results']
-        with open('forecast_preds.pkl', 'wb') as f:
-            pickle.dump(forecast_results, f)
-        # remove forecast preds from outputs
-        outputs.pop('forecast_preds_results', None)
 
     rank, _ = get_dist_info()
     if rank == 0:
@@ -245,8 +239,9 @@ def main():
             assert False
             #mmcv.dump(outputs['bbox_results'], args.out)
         kwargs = {} if args.eval_options is None else args.eval_options
-        kwargs['jsonfile_prefix'] = osp.join('test', args.config.split(
-            '/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
+        if 'jsonfile_prefix' not in kwargs:
+            kwargs['jsonfile_prefix'] = osp.join('test', args.config.split(
+                '/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
         if args.format_only:
             dataset.format_results(outputs, **kwargs)
 
@@ -259,8 +254,7 @@ def main():
             ]:
                 eval_kwargs.pop(key, None)
             eval_kwargs.update(dict(metric=args.eval, **kwargs))
-
-            print(dataset.evaluate(outputs, **eval_kwargs))
+            dataset.evaluate(outputs, **eval_kwargs)
 
 
 if __name__ == '__main__':
