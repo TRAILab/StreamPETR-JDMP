@@ -14,6 +14,7 @@ OUTPUT_DIR=$PROJ_DIR/output
 
 # Container paths
 CONFIG_DIR=/proj/projects/configs/StreamPETR
+CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
 MODEL_CKPT=/proj/output/$CONFIG_NAME/latest.pth
 WRK_DIR=/proj/output/$CONFIG_NAME
 EVAL_OPT=jsonfile_prefix=/proj/output/$CONFIG_NAME
@@ -30,17 +31,6 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 
 # For single checkpoint
 BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --eval-options '$EVAL_OPT'"
-
-# For multiple checkpoints
-# BASE_CMD="/bin/bash -c '"
-# MODEL_CKPTS=(output/$CONFIG_NAME/iter_*.pth)
-# echo "MODEL_CKPTS: ${MODEL_CKPTS[@]}"
-# for MODEL_CKPT in "${MODEL_CKPTS[@]}"
-# do
-#     EVAL_OPT=jsonfile_prefix=${MODEL_CKPTS%.*}
-#     BASE_CMD="${BASE_CMD} tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --eval-options '$EVAL_OPT';"
-# done
-# BASE_CMD="${BASE_CMD}'"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"
