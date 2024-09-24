@@ -6,11 +6,11 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
-        dict(type='MMDetWandbHook',
+        dict(type='WandbLoggerHook',
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='stream_petr_r50_flash_704_bs4_seq_428q_nui_60e_4gpu'),
+                name='jdmpvov_baseline_bs8_2gpu'),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -22,17 +22,17 @@ plugin_dir='projects/mmdet3d_plugin/'
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 img_norm_cfg = dict(
-    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
+    mean=[103.530, 116.280, 123.675], std=[57.375, 57.120, 58.395], to_rgb=False) # fix img_norm
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
-num_gpus = 4
-batch_size = 4
+num_gpus = 2
+batch_size = 8
 num_iters_per_epoch = 28130 // (num_gpus * batch_size)
-num_epochs = 60
+num_epochs = 24
 
 queue_length = 1
 num_frame_losses = 1
@@ -50,21 +50,15 @@ model = dict(
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
     img_backbone=dict(
-        init_cfg=dict(
-            type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
-            prefix='backbone.'),       
-        type='ResNet',
-        depth=50,
-        num_stages=4,
-        out_indices=(2, 3),
-        frozen_stages=-1,
-        norm_cfg=dict(type='BN2d', requires_grad=False),
+        type='VoVNetCP', ###use checkpoint to save memory
+        spec_name='V-99-eSE',
         norm_eval=True,
-        with_cp=True,
-        style='pytorch'),
+        frozen_stages=-1,
+        input_ch=3,
+        out_features=('stage4','stage5',)),
     img_neck=dict(
         type='CPFPN',  ###remove unused parameters 
-        in_channels=[1024, 2048],
+        in_channels=[768, 1024],
         out_channels=256,
         num_outs=2),
     img_roi_head=dict(
@@ -92,10 +86,10 @@ model = dict(
         type='StreamPETRHead',
         num_classes=10,
         in_channels=256,
-        num_query=300,
-        memory_len=512,
-        topk_proposals=128,
-        num_propagated=128,
+        num_query=644,
+        memory_len=1024,
+        topk_proposals=256,
+        num_propagated=256,
         with_ego_pos=True,
         match_with_velo=False,
         scalar=10, ##noise groups
@@ -168,8 +162,8 @@ file_client_args = dict(backend='disk')
 
 
 ida_aug_conf = {
-        "resize_lim": (0.38, 0.55),
-        "final_dim": (256, 704),
+        "resize_lim": (0.47, 0.625),
+        "final_dim": (320, 800),
         "bot_pct_lim": (0.0, 0.0),
         "rot_lim": (0.0, 0.0),
         "H": 900,
@@ -242,6 +236,7 @@ data = dict(
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
 
+
 optimizer = dict(
     type='AdamW', 
     lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
@@ -261,10 +256,10 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=num_iters_per_epoch*num_epochs, pipeline=test_pipeline)
+evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
 checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from=None
+load_from='ckpts/fcos3d_vovnet_imgbackbone-remapped.pth'
 resume_from=None
