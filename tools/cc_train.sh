@@ -1,20 +1,20 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmp_mini_attforecast_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e    # Job name
+#SBATCH --job-name=train_jdmpvov_baseline_bs8_2gpu    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
-#SBATCH --time=2-23:59:00               # Time limit hrs:min:sec
+#SBATCH --time=23:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:a100:1           # gpu:t4:4 (graham) or gpu:a100:1 (narval)
+#SBATCH --gres=gpu:a100:2          # gpu:t4:4 (graham) or gpu:a100:2 (narval)
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=ALL
 
 # Parameters
 SERVER=narval
 DATASET=nuscenes
-NUM_GPUS=1
-CFG_NAME=jdmp_mini_attforecast_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e
+NUM_GPUS=2
+CFG_NAME=jdmpvov_baseline_bs8_2gpu
 
 # Host paths
 HOME_DIR=/home/spapais

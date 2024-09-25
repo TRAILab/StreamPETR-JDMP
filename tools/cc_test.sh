@@ -1,19 +1,19 @@
 #!/bin/bash
-#SBATCH --job-name=test_jdmp_baseline_bs4_4gpu    # Job name
+#SBATCH --job-name=test_jdmpvov_baseline_bs8_2gpu    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
 #SBATCH --time=2:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:t4:4           # gpu:t4:4 (graham) or gpu:a100:1 (narval)
+#SBATCH --gres=gpu:a100:2          # gpu:t4:4 (graham) or gpu:a100:2 (narval)
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=ALL
 
 # Parameters
-SERVER=graham
-NUM_GPUS=4
-CFG_NAME=jdmp_baseline_bs4_4gpu
+SERVER=narval
+NUM_GPUS=2
+CFG_NAME=jdmpvov_baseline_bs8_2gpu
 
 # Host paths
 HOME_DIR=/home/spapais
