@@ -32,7 +32,7 @@ DATE_TIME=$(date +"%Y%m%d_%H%M%S")
 
 BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox"
 
-CONTAINER_CMD="docker run -d --ipc host --gpus $GPUS -w /proj/
+CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"
 $VOLUMES
 $DOCKER_IMG
