@@ -344,19 +344,21 @@ class CustomNuScenesDataset(NuScenesDataset):
         gts = []
         start_time = time.time()
         for sample_id, forecast in enumerate(forecast_results):
-            # Get forecast and gt positions
+            # Get gt and forecast positions
             sample_token = self.data_infos[sample_id]['token']
-            if forecast.dim() == 3:
-                forecast = forecast.unsqueeze(1) # [n_agents, n_modes, n_timesteps, n_states]
-                forecast_probs = np.ones((forecast.shape[0], 1))
-            else:
-                ValueError("Forecast should have 3 dimensions.") # TODO: add probability as input from model
-            forecast = forecast.detach().cpu().numpy()
-            forecast_cur_positions = forecast[:,0,0]
-            forecast_pred_positions = forecast[:,:,1:]
+            if self.data_infos[sample_id]['gt_forecasting_locs'].size == 0:
+                continue
             gt = self.data_infos[sample_id]['gt_forecasting_locs'][:,:,:2]
             gt_cur_positions = gt[:,0]
             gt_pred_positions = gt[:,1:]
+            if forecast.dim() == 3: # Single mode forecasts
+                forecast = forecast.unsqueeze(1) # [n_agents, n_modes, n_timesteps, n_states]
+                forecast_probs = np.ones((forecast.shape[0], 1))
+            else: # TODO: Add multiple mode forecasts and probabilities from model
+                ValueError("Forecast should have 3 dimensions.") 
+            forecast = forecast.detach().cpu().numpy()
+            forecast_cur_positions = forecast[:,0,0]
+            forecast_pred_positions = forecast[:,:,1:]
 
             # Match forecast to gt
             delta = gt_cur_positions.reshape(-1,1,2) - forecast_cur_positions.reshape(1,-1,2)
