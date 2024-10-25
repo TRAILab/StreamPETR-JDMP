@@ -400,7 +400,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         coords = coords.unsqueeze(-1)
 
-        img2lidars = data['lidar2img'].inverse()
+        img2lidars = torch.inverse(data['lidar2img'].cpu()).cuda()
         img2lidars = img2lidars.view(BN, 1, 1, 4, 4).repeat(1, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
         img2lidars = topk_gather(img2lidars, topk_indexes)
 
