@@ -71,6 +71,7 @@ class StreamPETRHead(AnchorFreeHead):
                  num_propagated=256,
                  with_dn=True,
                  with_ego_pos=True,
+                 with_velo_forecast=False,
                  match_with_velo=True,
                  match_costs=None,
                  transformer=None,
@@ -165,6 +166,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.num_propagated = num_propagated
         self.with_dn = with_dn
         self.with_ego_pos = with_ego_pos
+        self.with_velo_forecast = with_velo_forecast
         self.match_with_velo = match_with_velo
         self.num_reg_fcs = num_reg_fcs
         self.train_cfg = train_cfg
@@ -561,7 +563,7 @@ class StreamPETRHead(AnchorFreeHead):
               self)._load_from_state_dict(state_dict, prefix, local_metadata,
                                           strict, missing_keys,
                                           unexpected_keys, error_msgs)
-    
+
 
     def forward(self, memory_center, img_metas, topk_indexes=None,  **data):
         """Forward function.
@@ -646,6 +648,20 @@ class StreamPETRHead(AnchorFreeHead):
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict':None,
             }
+
+        # Constant velocity forecast
+        if self.with_velo_forecast:
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
+                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:][-1]
+            else:
+                rec_reference_points = all_bbox_preds[..., :3][-1]
+                rec_velo = all_bbox_preds[..., -2:][-1]
+            num_future_frames = 12
+            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) + \
+                rec_velo.unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) * pred_dts
+            outs['all_forecast_preds'] = all_forecast_preds
 
         return outs
     
@@ -1035,4 +1051,16 @@ class StreamPETRHead(AnchorFreeHead):
             scores = preds['scores']
             labels = preds['labels']
             ret_list.append([bboxes, scores, labels])
+        return ret_list
+
+    @force_fp32(apply_to=('preds_dicts'))
+    def get_forecasts(self, preds_dicts):
+        """Generate bboxes from bbox head predictions.
+        Args:
+            preds_dicts (tuple[list[dict]]): Prediction results.
+            img_metas (list[dict]): Point cloud and image's meta info.
+        Returns:
+            list[dict]: Decoded bbox, scores and labels after nms.
+        """
+        ret_list = preds_dicts['all_forecast_preds'] if 'all_forecast_preds' in preds_dicts else None
         return ret_list
