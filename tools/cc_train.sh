@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmpvov_baseline_bs8_2gpu    # Job name
+#SBATCH --job-name=train_stream_petr_velforecast_vov_flash_800_bs2_seq_24e_2gpu    # Job name
 #SBATCH --account=rrg-swasland
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=120gb                     # Job memory request
-#SBATCH --time=23:59:00               # Time limit hrs:min:sec
+#SBATCH --time=2:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:a100:2           # gpu:t4:4 (graham) or gpu:a100:2 (narval)
+#SBATCH --gres=gpu:a100:2           # gpu:t4:4 (graham) or gpu:a100:1 (narval)
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=ALL
 
@@ -14,7 +14,7 @@
 SERVER=narval
 DATASET=nuscenes
 NUM_GPUS=2
-CFG_NAME=jdmpvov_baseline_bs8_2gpu
+CFG_NAME=stream_petr_velforecast_vov_flash_800_bs2_seq_24e_2gpu
 
 # Host paths
 HOME_DIR=/home/spapais
@@ -65,6 +65,10 @@ if [ "$DATASET" = "nuscenes_mini" ]; then
     file=$DATA_PKL_DIR/v1.0-mini.tgz
     echo "[$((duration/3600))h$((duration%3600/60))m]: Unzipping $file to $TMP_DATA_DIR"
     tar -xf $file -C $TMP_DATA_DIR
+    duration=$SECONDS
+    file=$DATA_DIR/maps.zip
+    echo "[$((duration/3600))h$(((duration%3600)/60))m]: Unzipping $file to $TMP_DATA_DIR"
+    unzip -o -qq $DATA_DIR/maps.zip -d $TMP_DATA_DIR
     duration=$SECONDS
     file=$DATA_PKL_DIR/nuscenes2d_mini_temporal_infos_train.pkl
     echo "[$((duration/3600))h$(((duration%3600)/60))m]: Copying $file to $TMP_DATA_DIR"

@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmpvov_attforecast_prop_graddetach_qembsep_6lay_attmem_bs8_2gpu
+CONFIG_NAME=stream_petr_velforecast_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
@@ -29,8 +29,7 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/sweeps:/proj/data/nuscenes/sweeps
 -v $OUTPUT_DIR:/proj/output/"
 
-# For single checkpoint
-BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --eval-options '$EVAL_OPT'"
+BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox forecast --eval-options '$EVAL_OPT'"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"

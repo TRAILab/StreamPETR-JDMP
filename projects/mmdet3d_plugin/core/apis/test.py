@@ -56,11 +56,12 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             different gpus under cpu mode.
         gpu_collect (bool): Option to use either gpu or cpu to collect results.
     Returns:
-        list: The prediction results.
+        results (dict(list)): The prediction results including bbox, mask, and forecast preds.
     """
     model.eval()
     bbox_results = []
     mask_results = []
+    forecast_results = []
     dataset = data_loader.dataset
     rank, world_size = get_dist_info()
     if rank == 0:
@@ -70,6 +71,12 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
     for i, data in enumerate(data_loader):
         with torch.no_grad():
             result = model(return_loss=False, rescale=True, **data)
+            
+            if len(result) > 1:
+                forecast_result = result[1]
+                forecast_results.extend(forecast_result)
+                result = result[0]
+                
             # encode mask results
             if isinstance(result, dict):
                 if 'bbox_results' in result.keys():
@@ -89,28 +96,42 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
             #    result = [(bbox_results, encode_mask_results(mask_results))
             #              for bbox_results, mask_results in result]
         if rank == 0:
-            
             for _ in range(batch_size * world_size):
                 prog_bar.update()
 
     # collect results from all ranks
     if gpu_collect:
         bbox_results = collect_results_gpu(bbox_results, len(dataset))
+        if forecast_results:
+            forecast_results = collect_results_gpu(forecast_results, len(dataset))
+        else:
+            forecast_results = None
         if have_mask:
             mask_results = collect_results_gpu(mask_results, len(dataset))
         else:
             mask_results = None
     else:
         bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
-        tmpdir = tmpdir+'_mask' if tmpdir is not None else None
+        if forecast_results:
+            forecast_tmpdir = tmpdir+'_forecast' if tmpdir is not None else None
+            forecast_results = collect_results_cpu(forecast_results, len(dataset), forecast_tmpdir)
+        else:
+            forecast_results = None
         if have_mask:
-            mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
+            mask_tmpdir = tmpdir+'_mask' if tmpdir is not None else None
+            mask_results = collect_results_cpu(mask_results, len(dataset), mask_tmpdir)
         else:
             mask_results = None
 
-    if mask_results is None:
+    if forecast_results is None and mask_results is None:
         return bbox_results
-    return {'bbox_results': bbox_results, 'mask_results': mask_results}
+    else:
+        results = {'bbox_results': bbox_results}
+        if mask_results is not None:
+            results['mask_results'] = mask_results
+        if forecast_results is not None:
+            results['forecast_results'] = forecast_results
+        return results
 
 
 def collect_results_cpu(result_part, size, tmpdir=None):
