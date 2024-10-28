@@ -13,6 +13,7 @@ from shapely.geometry import MultiPoint, box
 
 from mmdet3d.core.bbox import points_cam2img
 from mmdet3d.datasets import NuScenesDataset
+from data_converter.nuscenes_prediction_tools import get_forecasting_annotations
 
 nus_categories = ('car', 'truck', 'trailer', 'bus', 'construction_vehicle',
                   'bicycle', 'motorcycle', 'pedestrian', 'traffic_cone',
@@ -270,11 +271,26 @@ def _fill_trainval_infos(nusc,
             info['gt_boxes'] = gt_boxes
             info['gt_names'] = names
             info['gt_velocity'] = velocity.reshape(-1, 2)
+            info['gt_instance_ids'] = np.array(
+                [nusc.getind('instance',anno['instance_token']) for anno in annotations])
             info['num_lidar_pts'] = np.array(
                 [a['num_lidar_pts'] for a in annotations])
             info['num_radar_pts'] = np.array(
                 [a['num_radar_pts'] for a in annotations])
             info['valid_flag'] = valid_flag
+
+            forecasting_length = 13 # 6 seconds + current frame
+            fboxes, fmasks, ftypes = get_forecasting_annotations(nusc, annotations, forecasting_length)
+            locs = [np.array([b.center for b in boxes]).reshape(-1, 3) for boxes in fboxes]
+            wlhs = [np.array([b.wlh for b in boxes]).reshape(-1, 3) for boxes in fboxes]
+            yaws = [np.array([b.orientation.yaw_pitch_roll[0] for b in boxes]).reshape(-1, 1) for boxes in fboxes]
+            vels = [np.array([b.velocity[:2] for b in boxes]).reshape(-1, 2) for boxes in fboxes]
+            fboxes = [np.concatenate([loc, wlh[:, [1, 0, 2]], yaw], axis=1) for loc, wlh, yaw in zip(locs, wlhs, yaws)]
+            info['gt_forecasting_boxes'] = np.array(fboxes)
+            info['gt_forecasting_velocity'] = np.array(vels)
+            info['gt_forecasting_locs'] = np.array(locs)
+            info['gt_forecasting_masks'] = np.array(fmasks)
+            info['gt_forecasting_types'] = np.array(ftypes)
 
             gt_2dbboxes_cams = []
             gt_3dbboxes_cams = []

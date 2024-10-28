@@ -20,7 +20,16 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 -v $OUTPUT_DIR:/proj/output/"
 
 BASE_CMD="python tools/create_data_nusc.py --root-path /proj/data/nuscenes --extra-tag nuscenes2d --version v1.0"
-# BASE_CMD="python tools/create_data_nusc.py --root-path /proj/data/nuscenes --extra-tag nuscenes2d_mini --version v1.0-mini"
+
+CONTAINER_CMD="docker run -it --ipc host -w /proj/
+$VOLUMES
+$DOCKER_IMG
+$BASE_CMD"
+
+echo "$CONTAINER_CMD"
+eval $CONTAINER_CMD
+
+BASE_CMD="python tools/create_data_nusc.py --root-path /proj/data/nuscenes --extra-tag nuscenes2d_mini --version v1.0-mini"
 
 CONTAINER_CMD="docker run -it --ipc host -w /proj/
 $VOLUMES
