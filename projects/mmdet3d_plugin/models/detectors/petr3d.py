@@ -319,17 +319,20 @@ class Petr3D(MVXTwoStageDetector):
             bbox3d2result(bboxes, scores, labels)
             for bboxes, scores, labels in bbox_list
         ]
-        return bbox_results
+        forecast_results = self.pts_bbox_head.get_forecasts(outs)
+        return bbox_results, forecast_results
     
     def simple_test(self, img_metas, **data):
         """Test function without augmentaiton."""
         data['img_feats'] = self.extract_img_feat(data['img'], 1)
 
         bbox_list = [dict() for i in range(len(img_metas))]
-        bbox_pts = self.simple_test_pts(
+        bbox_pts, forecast_preds = self.simple_test_pts(
             img_metas, **data)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
+        if forecast_preds is not None:
+            return bbox_list, forecast_preds
         return bbox_list
 
     

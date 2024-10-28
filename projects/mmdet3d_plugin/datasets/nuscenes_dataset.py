@@ -12,14 +12,20 @@
 import numpy as np
 from mmdet.datasets import DATASETS
 from mmdet3d.datasets import NuScenesDataset
-from mmdet.datasets import DATASETS
-from mmdet3d.core.bbox import LiDARInstance3DBoxes
 import torch
-import numpy as np
+from nuscenes import NuScenes
 from nuscenes.eval.common.utils import Quaternion
+from nuscenes.eval.prediction.data_classes import Prediction
+from nuscenes.eval.prediction.config import load_prediction_config
+from nuscenes.prediction import PredictHelper
 from mmcv.parallel import DataContainer as DC
 import random
 import math
+import mmcv
+import os.path as osp
+import json
+import time
+
 @DATASETS.register_module()
 class CustomNuScenesDataset(NuScenesDataset):
     r"""NuScenes Dataset.
@@ -280,6 +286,199 @@ class CustomNuScenesDataset(NuScenesDataset):
                 idx = self._rand_another(idx)
                 continue
             return data
+
+    def evaluate(self,
+                 results,
+                 metric=['bbox', 'forecast'],
+                 logger=None,
+                 jsonfile_prefix=None,
+                 result_names=['pts_bbox'],
+                 show=False,
+                 out_dir=None,
+                 pipeline=None):
+        """Evaluation in nuScenes protocol.
+
+        Args:
+            results (list[dict]): Testing results of the dataset.
+            metric (str | list[str], optional): Metrics to be evaluated.
+                Default: 'forecast'. Use 'bbox' for detection only evaluation.
+            logger (logging.Logger | str, optional): Logger used for printing
+                related information during evaluation. Default: None.
+            jsonfile_prefix (str, optional): The prefix of json files including
+                the file path and the prefix of filename, e.g., "a/b/prefix".
+                If not specified, a temp file will be created. Default: None.
+            show (bool, optional): Whether to visualize.
+                Default: False.
+            out_dir (str, optional): Path to save the visualization results.
+                Default: None.
+            pipeline (list[dict], optional): raw data loading for showing.
+                Default: None.
+
+        Returns:
+            dict[str, float]: Results of each evaluation metric.
+        """
+        results_dict = dict()
+        if 'forecast_results' in results:
+            forecast_results = results['forecast_results']
+            results = results['bbox_results']
+            preds, gts = self.forecast_format(forecast_results, jsonfile_prefix)
+            results_dict.update(self.forecast_evaluate(forecast_results, preds, gts, jsonfile_prefix))
+
+        if 'bbox' in metric:
+            results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+
+        if 'bbox' not in metric and 'forecast' not in metric:
+            raise ValueError(f'Invalid metric type {metric}.')
+        
+        return results_dict
+
+    def format_results(self, results, jsonfile_prefix=None):
+        """Format the results to json (standard format for COCO evaluation).
+
+        Args:
+            results (list[dict]): Testing results of the dataset.
+            jsonfile_prefix (str): The prefix of json files. It includes
+                the file path and the prefix of filename, e.g., "a/b/prefix".
+                If not specified, a temp file will be created. Default: None.
+
+        Returns:
+            tuple: Returns (result_files, tmp_dir), where `result_files` is a
+                dict containing the json filepaths, `tmp_dir` is the temporal
+                directory created for saving json files when
+                `jsonfile_prefix` is not specified.
+        """
+        if 'forecast_results' in results:
+            forecast_results = results['forecast_results']
+            results = results['bbox_results']
+            self.forecast_format(forecast_results, jsonfile_prefix)
+        result_files, tmp_dir = super().format_results(results, jsonfile_prefix)
+        return result_files, tmp_dir
+
+    def forecast_format(self, forecast_results, jsonfile_prefix=None, match_threshold=2):
+        """Format the forecast results to json.
+
+        Args:
+            forecast_results (list[dict]): Forecast testing results of the dataset.
+            jsonfile_prefix (str): The prefix of json files. It includes
+                the file path and the prefix of filename, e.g., "a/b/prefix".
+                If not specified, a temp file will be created. Default: None.
+        """
+        print('\nFormatting forecasts')
+        preds = []
+        gts = []
+        start_time = time.time()
+        for sample_id, forecast in enumerate(forecast_results):
+            # Get gt and forecast positions
+            sample_token = self.data_infos[sample_id]['token']
+            if self.data_infos[sample_id]['gt_forecasting_locs'].size == 0:
+                continue
+            gt = self.data_infos[sample_id]['gt_forecasting_locs'][:,:,:2]
+            gt_cur_positions = gt[:,0]
+            gt_pred_positions = gt[:,1:]
+            if forecast.dim() == 3: # Single mode forecasts
+                forecast = forecast.unsqueeze(1) # [n_agents, n_modes, n_timesteps, n_states]
+                forecast_probs = np.ones((forecast.shape[0], 1))
+            else: # TODO: Add multiple mode forecasts and probabilities from model
+                ValueError("Forecast should have 3 dimensions.") 
+            forecast = forecast.detach().cpu().numpy()
+            forecast_cur_positions = forecast[:,0,0]
+            forecast_pred_positions = forecast[:,:,1:]
+
+            # Match forecast to gt
+            delta = gt_cur_positions.reshape(-1,1,2) - forecast_cur_positions.reshape(1,-1,2)
+            dist = np.sqrt(delta[:,:,0]**2 + delta[:,:,1]**2)
+            min_gt_idx, min_dist = np.argmin(dist, axis=0), np.min(dist, axis=0)
+            match_true = min_dist < match_threshold
+            gt_ids = min_gt_idx[match_true]
+            pred_ids = np.arange(len(forecast))[match_true]
+
+            # Get matched gt and predictions and apply gt masks
+            for pred_id, gt_id in zip(pred_ids, gt_ids):
+                gt_pred_mask = self.data_infos[sample_id]['gt_forecasting_masks'][gt_id][1:]
+                if gt_pred_mask.sum() == 0:
+                    continue
+                gt = gt_pred_positions[gt_id][gt_pred_mask]
+                gts.append(gt.tolist())
+                instance_token = '0' # Not needed
+                sample_token = self.data_infos[sample_id]['token']
+                pred = forecast_pred_positions[pred_id][:,gt_pred_mask]
+                prob = forecast_probs[pred_id]
+                preds.append(Prediction(instance_token, sample_token, pred, prob).serialize())
+        print('Format time: ', round(time.time()-start_time,1), 's')
+
+        # Write results to file
+        if jsonfile_prefix is not None:
+            print('Forecast results writes to', jsonfile_prefix)
+            jsonfile_prefix = osp.join(jsonfile_prefix,'forecast')
+            mmcv.mkdir_or_exist(jsonfile_prefix)
+            path = osp.join(jsonfile_prefix, 'results_nusc.json')
+            json.dump(preds, open(path, "w"), indent=2)
+
+        return preds, gts
+
+    def forecast_evaluate(self, forecast_results, preds, gts, jsonfile_prefix=None):
+        """Evaluation for a single forecast model in nuScenes protocol.
+
+        Args:
+            forecast_results (list[dict]): Forecast testing results of the dataset.
+            preds (list[dict]): List of prediction dictionaries.
+            gts (list[list[list]]): List of ground truth trajectories (n_gt, n_times, n_states).
+            jsonfile_prefix (str): The prefix of json files. It includes
+                the file path and the prefix of filename, e.g., "a/b/prefix".
+                If not specified, a temp file will be created. Default: None.
+
+        Returns:
+            dict: Dictionary of evaluation details.
+        """
+        print("Evaluating forecast")
+        start_time = time.time()
+        config_name = 'predict_2020_icra.json'
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
+        helper = PredictHelper(nusc)
+        config = load_prediction_config(helper, config_name)
+
+        # Aggregate metrics
+        n_preds = len(preds)
+        containers = {metric.name: np.zeros((n_preds, metric.shape)) for metric in config.metrics}
+        for i in range(n_preds):
+            pred = Prediction.deserialize(preds[i]) # [n_modes, n_timesteps, n_states]
+            gt = np.array(gts[i])  # [n_timesteps, n_states]
+            for forecast_metric in config.metrics:
+                containers[forecast_metric.name][i] = forecast_metric(gt, pred)
+
+        # Format results
+        results = {}
+        for forecast_metric in config.metrics:
+            for agg in forecast_metric.aggregators:
+                if hasattr(forecast_metric, 'k_to_report'):
+                    for i, k in enumerate(forecast_metric.k_to_report):
+                        metric_name = 'forecast/'+forecast_metric.name.replace('K', str(k))
+                        results[metric_name] = agg(containers[forecast_metric.name])[i]
+                else:
+                    metric_name = 'forecast/'+forecast_metric.name
+                    results[metric_name] = agg(containers[forecast_metric.name])[0]
+        num_forecasts = forecast_results[0].shape[0]
+        num_matches_avg = n_preds / len(self.data_infos)
+        results['forecast/AvgMatchRate_2'] = num_matches_avg / num_forecasts
+        for result in results:
+            results[result] = round(results[result], 4)
+
+        # Print results
+        results_str = json.dumps(results, indent=2)[2:-2]
+        results_str = results_str.replace(" ", "").replace("\"", "").replace(":", ": ").replace("forecast/", "").replace(",", "")
+        print(results_str)
+        print('Eval time: ', round(time.time()-start_time,1), 's')
+
+        # Write results to file
+        if jsonfile_prefix is not None:
+            jsonfile_prefix = osp.join(jsonfile_prefix,'forecast')
+            mmcv.mkdir_or_exist(jsonfile_prefix)
+            path = osp.join(jsonfile_prefix, 'results_nusc.json')
+            json.dump(preds, open(path, "w"), indent=2)
+            path = osp.join(jsonfile_prefix, 'metrics_summary.json')
+            json.dump(results, open(path, "w"), indent=2)
+        
+        return results
 
 def invert_matrix_egopose_numpy(egopose):
     """ Compute the inverse transformation of a 4x4 egopose numpy matrix."""
