@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=stream_petr_mini_r50_flash_704_bs8_seq_428q_nui_60e_1gpu
+CONFIG_NAME=jdmp_mini_velforecast_baseline_bs16_1gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
