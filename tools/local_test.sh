@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_mini_forecast_cv_bs16_1gpu
+CONFIG_NAME=jdmpvov_attforecast_prop_graddetach_qembsep_6lay_attmem_bs8_2gpu
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
@@ -17,6 +17,7 @@ CONFIG_DIR=/proj/projects/configs/StreamPETR
 CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
 MODEL_CKPT=/proj/output/$CONFIG_NAME/latest.pth
 WRK_DIR=/proj/output/$CONFIG_NAME
+EVAL_OPT=jsonfile_prefix=/proj/output/$CONFIG_NAME
 
 VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/samples:/proj/data/nuscenes/samples
@@ -28,9 +29,8 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/sweeps:/proj/data/nuscenes/sweeps
 -v $OUTPUT_DIR:/proj/output/"
 
-DATE_TIME=$(date +"%Y%m%d_%H%M%S")
-
-BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox"
+# For single checkpoint
+BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --eval-options '$EVAL_OPT'"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 --env="WANDB_API_KEY=$WANDB_API_KEY"

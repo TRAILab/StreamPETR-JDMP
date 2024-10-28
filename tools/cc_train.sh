@@ -6,7 +6,7 @@
 #SBATCH --time=23:59:00               # Time limit hrs:min:sec
 #SBATCH --output=/home/spapais/output/streampetr_jdmp/%x-%j.log   # Standard output and error log
 #SBATCH --cpus-per-task=12
-#SBATCH --gres=gpu:a100:2          # gpu:t4:4 (graham) or gpu:a100:2 (narval)
+#SBATCH --gres=gpu:a100:2           # gpu:t4:4 (graham) or gpu:a100:2 (narval)
 #SBATCH --mail-user="sandro.papais@robotics.utias.utoronto.ca"
 #SBATCH --mail-type=ALL
 
