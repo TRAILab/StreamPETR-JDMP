@@ -973,8 +973,13 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
             topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
             rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
-            rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
-            all_forecast_preds = rec_reference_points + rec_velo * 0.5
+            # rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
+            # all_forecast_preds = rec_reference_points + rec_velo * 0.5
+            num_future_frames = 12
+            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) + \
+                rec_velo.unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) * pred_dts
+            # TODO: check how this affects loss computation
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
             forecast_points = all_forecast_preds[-1][...,:3].detach()
             self.memory_reference_point[:, :self.num_propagated] = forecast_points
@@ -1100,15 +1105,14 @@ class JDMPPETRHead(AnchorFreeHead):
             matched_pred_inds = matched_pred_inds[matched_dist < self.forecast_threshold]
 
         # forecast targets
-        code_size = gt_forecasting_bboxes_3d.size(-1)
-        if forecast_pred.size(-1) == 3:
-            code_size = 3
+        code_size = forecast_pred.size(-1)
         forecast_weights = torch.zeros_like(forecast_pred)
         forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
-        forecast_indices = [1]
         if sampling_result.num_gts > 0:
-            forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, forecast_indices, :code_size].float()
-            forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds, forecast_indices].float().unsqueeze(-1)
+            forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, ..., :code_size].float()
+            forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds].float().unsqueeze(-1)
+        forecast_targets = forecast_targets.reshape(-1, code_size)
+        forecast_weights = forecast_weights.reshape(-1, code_size)
         return (labels, label_weights, bbox_targets, bbox_weights, 
                 forecast_targets, forecast_weights, pos_inds, neg_inds)
 
@@ -1458,4 +1462,17 @@ class JDMPPETRHead(AnchorFreeHead):
             scores = preds['scores']
             labels = preds['labels']
             ret_list.append([bboxes, scores, labels])
+        return ret_list
+
+
+    @force_fp32(apply_to=('preds_dicts'))
+    def get_forecasts(self, preds_dicts):
+        """Generate bboxes from bbox head predictions.
+        Args:
+            preds_dicts (tuple[list[dict]]): Prediction results.
+            img_metas (list[dict]): Point cloud and image's meta info.
+        Returns:
+            list[dict]: Decoded bbox, scores and labels after nms.
+        """
+        ret_list = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
         return ret_list

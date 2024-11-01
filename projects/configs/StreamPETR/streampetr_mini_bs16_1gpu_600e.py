@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_baseline_bs16_1gpu_600e'),
+                name='streampetr_mini_bs16_1gpu_600e'),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)

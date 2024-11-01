@@ -6,12 +6,12 @@ log_config = dict(
     interval=50,
     hooks=[
         dict(type='TextLoggerHook'),
-        # dict(type='WandbLoggerHook',
-        #     init_kwargs=dict(
-        #         entity='trailab',
-        #         project='JDMP',
-        #         name='jdmp_mini_attforecast_map_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e.py',),
-        #     interval=50)
+        dict(type='WandbLoggerHook',
+            init_kwargs=dict(
+                entity='trailab',
+                project='JDMP',
+                name='jdmp_mini_attforecast_map_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e.py',),
+            interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
@@ -44,7 +44,7 @@ input_modality = dict(
     use_map=False,
     use_external=True)
 model = dict(
-    type='Petr3D',
+    type='JDMPPetr3D',
     num_frame_head_grads=num_frame_losses,
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
@@ -186,7 +186,7 @@ model = dict(
             pc_range=point_cloud_range),)))
 
 
-dataset_type = 'CustomNuScenesDataset'
+dataset_type = 'JDMPCustomNuScenesDataset'
 data_root = './data/nuscenes/'
 
 file_client_args = dict(backend='disk')
@@ -208,7 +208,7 @@ train_pipeline = [
     dict(type='JDMPObjectRangeFilter', point_cloud_range=point_cloud_range),
     dict(type='JDMPObjectNameFilter', classes=class_names),
     dict(type='ResizeCropFlipRotImage', data_aug_conf = ida_aug_conf, training=True),
-    dict(type='GlobalRotScaleTransImage',
+    dict(type='JDMPGlobalRotScaleTransImage',
             rot_range=[-0.3925, 0.3925],
             translation_std=[0, 0, 0],
             scale_ratio_range=[0.95, 1.05],

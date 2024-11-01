@@ -328,18 +328,17 @@ class GlobalRotScaleTransImage():
         self._rotate_bev_along_z(results, rot_angle)
         if self.reverse_angle:
             rot_angle = rot_angle * -1
-        results["gt_bboxes_3d"].rotate(np.array(rot_angle))  
-        results["gt_forecasting_bboxes_3d"].rotate(np.array(rot_angle))
+        results["gt_bboxes_3d"].rotate(
+            np.array(rot_angle)
+        )  
 
         # random scale
         self._scale_xyz(results, scale_ratio)
         results["gt_bboxes_3d"].scale(scale_ratio)
-        results["gt_forecasting_bboxes_3d"].scale(scale_ratio)
 
-        # random translate
+        #random translate
         self._trans_xyz(results, trans)
         results["gt_bboxes_3d"].translate(trans)
-        results["gt_forecasting_bboxes_3d"].translate(trans)
 
         return results
 
@@ -387,6 +386,49 @@ class GlobalRotScaleTransImage():
         for view in range(num_view):
             results["lidar2img"][view] = (torch.tensor(results["lidar2img"][view]).float() @ scale_mat_inv).numpy()
 
+@PIPELINES.register_module()
+class JDMPGlobalRotScaleTransImage(GlobalRotScaleTransImage):
+    def __init__(
+        self,
+        rot_range=[-0.3925, 0.3925],
+        scale_ratio_range=[0.95, 1.05],
+        translation_std=[0, 0, 0],
+        reverse_angle=False,
+        training=True,
+    ):
+        super().__init__(
+            rot_range=rot_range,
+            scale_ratio_range=scale_ratio_range,
+            translation_std=translation_std,
+            reverse_angle=reverse_angle,
+            training=training,
+        )
+
+    def __call__(self, results):
+        # random rotate
+        translation_std = np.array(self.translation_std, dtype=np.float32)
+
+        rot_angle = np.random.uniform(*self.rot_range)
+        scale_ratio = np.random.uniform(*self.scale_ratio_range)
+        trans = np.random.normal(scale=translation_std, size=3).T
+
+        self._rotate_bev_along_z(results, rot_angle)
+        if self.reverse_angle:
+            rot_angle = rot_angle * -1
+        results["gt_bboxes_3d"].rotate(np.array(rot_angle))  
+        results["gt_forecasting_bboxes_3d"].rotate(np.array(rot_angle))
+
+        # random scale
+        self._scale_xyz(results, scale_ratio)
+        results["gt_bboxes_3d"].scale(scale_ratio)
+        results["gt_forecasting_bboxes_3d"].scale(scale_ratio)
+
+        # random translate
+        self._trans_xyz(results, trans)
+        results["gt_bboxes_3d"].translate(trans)
+        results["gt_forecasting_bboxes_3d"].translate(trans)
+
+        return results
 
 @PIPELINES.register_module()
 class JDMPObjectRangeFilter(object):
