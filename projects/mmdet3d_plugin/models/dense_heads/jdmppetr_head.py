@@ -1108,7 +1108,7 @@ class JDMPPETRHead(AnchorFreeHead):
         code_size = forecast_pred.size(-1)
         forecast_weights = torch.zeros_like(forecast_pred)
         forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
-        if sampling_result.num_gts > 0:
+        if len(matched_pred_inds) > 0:
             forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, ..., :code_size].float()
             forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds].float().unsqueeze(-1)
         forecast_targets = forecast_targets.reshape(-1, code_size)
