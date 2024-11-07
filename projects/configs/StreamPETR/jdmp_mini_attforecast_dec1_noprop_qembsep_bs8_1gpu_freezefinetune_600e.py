@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_prop_graddetach_qembsep_6lay_attmem_bs16_1gpu.py',),
+                name='jdmp_mini_attforecast_dec1_noprop_qembsep_bs8_1gpu_freezefinetune_600e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -30,9 +30,9 @@ class_names = [
 ]
 
 num_gpus = 1
-batch_size = 16
+batch_size = 8
 num_iters_per_epoch = 323 // (num_gpus * batch_size)
-num_epochs = 60
+num_epochs = 600
 
 queue_length = 1
 num_frame_losses = 1
@@ -49,6 +49,7 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
+    freeze_nonforecast_layers=True,
     img_backbone=dict(
         init_cfg=dict(
             type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
@@ -75,11 +76,11 @@ model = dict(
             type='QualityFocalLoss',
             use_sigmoid=True,
             beta=2.0,
-            loss_weight=2.0),
-        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
-        loss_bbox2d=dict(type='L1Loss', loss_weight=5.0),
-        loss_iou2d=dict(type='GIoULoss', loss_weight=2.0),
-        loss_centers2d=dict(type='L1Loss', loss_weight=10.0),
+            loss_weight=0.0),
+        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=0.0),
+        loss_bbox2d=dict(type='L1Loss', loss_weight=0.0),
+        loss_iou2d=dict(type='GIoULoss', loss_weight=0.0),
+        loss_centers2d=dict(type='L1Loss', loss_weight=0.0),
         train_cfg=dict(
         assigner2d=dict(
             type='HungarianAssigner2D',
@@ -104,8 +105,10 @@ model = dict(
         split = 0.75, ###positive rate
         LID=True,
         forecast_emb_sep=True,
-        forecast_mem_update=True,
+        forecast_mem_update=False,
         with_position=True,
+        with_attn_forecast=True,
+        with_velo_forecast=False,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         detect_transformer=dict(
@@ -139,7 +142,7 @@ model = dict(
             decoder=dict(
                 type='PETRTransformerDecoder',
                 return_intermediate=True,
-                num_layers=6,
+                num_layers=1,
                 transformerlayers=dict(
                     type='PETRTemporalDecoderLayer',
                     attn_cfgs=[
@@ -167,9 +170,9 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=2.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
+            loss_weight=0.0),
+        loss_bbox=dict(type='L1Loss', loss_weight=0.0),
+        loss_forecast=dict(type='L1Loss', loss_weight=1.0),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -218,7 +221,7 @@ train_pipeline = [
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_forecasting_bboxes_3d', 'gt_forecasting_masks'] + collect_keys,
-             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d', 'sample_idx'))
+             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d', 'gt_labels_3d', 'sample_idx'))
 ]
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -260,15 +263,15 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
 
 optimizer = dict(
     type='AdamW', 
-    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=2e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
@@ -290,5 +293,5 @@ find_unused_parameters=False #### when use checkpoint, find_unused_parameters mu
 checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from=None
+load_from='output/jdmp_cvforecast_bs8_2gpu/latest.pth'
 resume_from=None

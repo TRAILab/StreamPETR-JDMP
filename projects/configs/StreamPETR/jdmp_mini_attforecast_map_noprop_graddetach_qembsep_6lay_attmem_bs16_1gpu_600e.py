@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_map_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e.py',),
+                name='jdmp_mini_attforecast_map_noprop_graddetach_qembsep_6lay_attmem_bs16_1gpu_600e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -261,8 +261,8 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )

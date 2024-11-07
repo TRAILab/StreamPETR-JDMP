@@ -2,17 +2,17 @@ _base_ = [
     '../../../mmdetection3d/configs/_base_/datasets/nus-3d.py',
     '../../../mmdetection3d/configs/_base_/default_runtime.py'
 ]
-# log_config = dict(
-#     interval=50,
-#     hooks=[
-#         dict(type='TextLoggerHook'),
-#         # dict(type='WandbLoggerHook',
-#         #     init_kwargs=dict(
-#         #         entity='trailab',
-#         #         project='JDMP',
-#         #         name='stream_petr_r50_flash_704_bs2_8key_2grad_24e_1gpu.py',),
-#         #     interval=50)
-#     ])
+log_config = dict(
+    interval=50,
+    hooks=[
+        dict(type='TextLoggerHook'),
+        dict(type='WandbLoggerHook',
+            init_kwargs=dict(
+                entity='trailab',
+                project='JDMP',
+                name='stream_petr_r50_flash_704_bs2_8key_2grad_24e_1gpu',),
+            interval=50)
+    ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
 plugin_dir='projects/mmdet3d_plugin/'

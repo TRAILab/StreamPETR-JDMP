@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_cvforecast_bs16_1gpu_finetune.py',),
+                name='jdmp_mini_cvforecast_prop_bs16_1gpu',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -270,7 +270,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW', 
-    lr=4e-5, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
@@ -292,5 +292,5 @@ find_unused_parameters=False #### when use checkpoint, find_unused_parameters mu
 checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from='output/jdmp_cvforecast_bs8_2gpu/latest.pth'
+load_from=None
 resume_from=None

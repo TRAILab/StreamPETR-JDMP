@@ -350,7 +350,8 @@ class JDMPPetr3D(MVXTwoStageDetector):
                  position_level=0,
                  aux_2d_only=True,
                  single_test=False,
-                 pretrained=None):
+                 pretrained=None,
+                 freeze_nonforecast_layers=False):
         super(JDMPPetr3D, self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
                              img_backbone, pts_backbone, img_neck, pts_neck,
@@ -367,7 +368,9 @@ class JDMPPetr3D(MVXTwoStageDetector):
         self.position_level = position_level
         self.aux_2d_only = aux_2d_only
         self.test_flag = False
-
+        self.freeze_nonforecast_layers = freeze_nonforecast_layers
+        if self.freeze_nonforecast_layers:
+            self.freeze_layers()
 
     def extract_img_feat(self, img, len_queue=1, training_mode=False):
         """Extract features of images."""
@@ -641,5 +644,22 @@ class JDMPPetr3D(MVXTwoStageDetector):
         if forecast_preds is not None:
             return bbox_list, forecast_preds
         return bbox_list
+    
+    def freeze_layers(self):
+        for param in self.parameters():
+            param.requires_grad = False
+        for param in self.pts_bbox_head.forecast_reg_branches.parameters():
+            param.requires_grad = True
+        for param in self.pts_bbox_head.forecast_transformer.parameters():
+            param.requires_grad = True
+        for param in self.pts_bbox_head.forecast_query_embedding.parameters():
+            param.requires_grad = True
+        for param in self.pts_bbox_head.forecast_time_embedding.parameters():
+            param.requires_grad = True
+        if self.pts_bbox_head.forecast_emb_sep and self.pts_bbox_head.with_forecast_ego_pos:
+            for param in self.pts_bbox_head.forecast_ego_pose_pe.parameters():
+                param.requires_grad = True
+            for param in self.pts_bbox_head.forecast_ego_pose_memory.parameters():
+                param.requires_grad = True
 
     

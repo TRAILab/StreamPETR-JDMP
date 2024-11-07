@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_traincvforecast_bs16_1gpu_finetune.py',),
+                name='jdmp_mini_attforecast_dec1_noprop_qembsep_bs8_1gpu_finetune_lren5_lroi0',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -30,7 +30,7 @@ class_names = [
 ]
 
 num_gpus = 1
-batch_size = 16
+batch_size = 8
 num_iters_per_epoch = 323 // (num_gpus * batch_size)
 num_epochs = 60
 
@@ -103,11 +103,11 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
-        forecast_emb_sep=False,
+        forecast_emb_sep=True,
         forecast_mem_update=False,
         with_position=True,
-        with_attn_forecast=False,
-        with_velo_forecast=True,
+        with_attn_forecast=True,
+        with_velo_forecast=False,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         detect_transformer=dict(
@@ -141,7 +141,7 @@ model = dict(
             decoder=dict(
                 type='PETRTransformerDecoder',
                 return_intermediate=True,
-                num_layers=6,
+                num_layers=1,
                 transformerlayers=dict(
                     type='PETRTemporalDecoderLayer',
                     attn_cfgs=[
@@ -270,7 +270,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW', 
-    lr=4e-5, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=2e-5, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.

@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_cvforecast_bs16_1gpu_600e.py',),
+                name='jdmp_mini_cvforecast_bs16_1gpu_600e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -104,7 +104,7 @@ model = dict(
         split = 0.75, ###positive rate
         LID=True,
         forecast_emb_sep=False,
-        forecast_mem_update=True,
+        forecast_mem_update=False,
         with_position=True,
         with_attn_forecast=False,
         with_velo_forecast=True,
@@ -171,7 +171,7 @@ model = dict(
             alpha=0.25,
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.0),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -262,8 +262,8 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
