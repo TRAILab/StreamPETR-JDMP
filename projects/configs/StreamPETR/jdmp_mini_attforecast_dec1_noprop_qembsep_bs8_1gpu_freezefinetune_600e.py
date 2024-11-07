@@ -293,5 +293,5 @@ find_unused_parameters=False #### when use checkpoint, find_unused_parameters mu
 checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from='output/jdmp_cvforecast_bs8_2gpu/latest.pth'
+load_from='output/jdmp_pretrain/jdmp_baseline.pth'
 resume_from=None
