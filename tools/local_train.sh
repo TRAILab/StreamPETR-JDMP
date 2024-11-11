@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_mini_attforecast_noprop_bs8_1gpu_freezefinetune_60e
+CONFIG_NAME=jdmp_mini_attforecast_prop_bs8_1gpu_finetunedet_60e
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths

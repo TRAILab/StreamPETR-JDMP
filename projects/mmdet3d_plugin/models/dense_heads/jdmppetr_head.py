@@ -1005,8 +1005,13 @@ class JDMPPETRHead(AnchorFreeHead):
             # all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) # Stationary forecast
             # TODO: check how this affects loss computation
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
-            forecast_points = all_forecast_preds[-1][...,:3].detach()
-            self.memory_reference_point[:, :self.num_propagated] = forecast_points
+            max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
+            max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
+            selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
+            forecast_points = transform_reference_points(self.memory_reference_point[:, :self.num_propagated], data['ego_pose_inv'], reverse=False)
+            forecast_points[...,:2] = selected_preds + detection_reference_point
+            forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
+            self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach()
             # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
         if mask_dict and mask_dict['pad_size'] > 0:
