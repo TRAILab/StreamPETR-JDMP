@@ -98,7 +98,7 @@ model = dict(
         split = 0.75, ###positive rate
         LID=True,
         forecast_emb_sep=False,
-        forecast_mem_update=True,
+        forecast_mem_update=False,
         with_attn_forecast=False,
         with_velo_forecast=True,
         with_position=True,
@@ -165,7 +165,7 @@ model = dict(
             alpha=0.25,
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.0),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -282,9 +282,9 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
+evaluation = dict(interval=num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=1)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
 load_from='ckpts/fcos3d_vovnet_imgbackbone-remapped.pth'

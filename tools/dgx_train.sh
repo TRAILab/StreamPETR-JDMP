@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=train_jdmpvov_baseline_bs8_2gpu   # Job name
+#SBATCH --job-name=train_jdmp_attforecast_noprop_bs8_2gpu_freezedet   # Job name
 #SBATCH --ntasks=1                    # Run on n CPUs
 #SBATCH --mem=100gb                     # Job memory request
 #SBATCH --time=7-00:00:00               # Time limit hrs:min:sec
@@ -11,7 +11,7 @@
 
 # Parameters
 NUM_GPUS=2
-CFG_NAME=jdmpvov_baseline_bs8_2gpu
+CFG_NAME=jdmp_attforecast_noprop_bs8_2gpu_freezedet
 SING_IMG=/raid/singularity/streampetr.sif
 CFG_FOLDER=projects/configs/StreamPETR
 

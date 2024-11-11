@@ -893,7 +893,7 @@ class JDMPForecastTransformer(BaseModule):
         self.num_forecast_layers = num_forecast_layers
         self.pc_range = nn.Parameter(torch.tensor(pc_range), requires_grad=False)
 
-        anchor_infos = pickle.load(open('output/uniad_anchors/motion_anchor_infos_mode6.pkl', 'rb'))
+        anchor_infos = pickle.load(open('ckpts/motion_anchor_infos_mode6.pkl', 'rb'))
         self.kmeans_anchors = torch.stack(
             [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float()
         self.kmeans_anchors = self.kmeans_anchors[:3].reshape(-1, 12, 2)
