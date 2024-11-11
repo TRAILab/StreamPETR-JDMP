@@ -30,6 +30,9 @@ from .attention import FlashMHA
 import torch.utils.checkpoint as cp
 
 from mmcv.runner import auto_fp16
+import pickle
+from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb2d
+import math
 
 @ATTENTION.register_module()
 class PETRMultiheadFlashAttention(BaseModule):
@@ -879,3 +882,347 @@ class JDMPTemporalTransformer(BaseModule):
             )
         out_dec = out_dec.transpose(1, 2).contiguous()
         return  out_dec
+
+@TRANSFORMER.register_module()
+class JDMPForecastTransformer(BaseModule):
+    def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, init_cfg=None):
+        super(JDMPForecastTransformer, self).__init__(init_cfg=init_cfg)
+        self.embed_dims = embed_dims
+        self.num_propagated = num_propagated
+        self.num_reg_fcs = num_reg_fcs
+        self.num_forecast_layers = num_forecast_layers
+        self.pc_range = nn.Parameter(torch.tensor(pc_range), requires_grad=False)
+
+        anchor_infos = pickle.load(open('output/uniad_anchors/motion_anchor_infos_mode6.pkl', 'rb'))
+        self.kmeans_anchors = torch.stack(
+            [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float()
+        self.kmeans_anchors = self.kmeans_anchors[:3].reshape(-1, 12, 2)
+        self.num_forecast_modes = self.kmeans_anchors.size(0)
+
+        self._init_layers()
+
+    def _init_layers(self):
+        """Initialize layers of the transformer head."""
+
+        traj_cls_branch = []
+        for _ in range(self.num_reg_fcs):
+            traj_cls_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
+            traj_cls_branch.append(nn.LayerNorm(self.embed_dims))
+            traj_cls_branch.append(nn.ReLU(inplace=True))
+        traj_cls_branch.append(nn.Linear(self.embed_dims, 1))
+        traj_cls_branch = nn.Sequential(*traj_cls_branch)
+        self.traj_cls_branches = nn.ModuleList([copy.deepcopy(traj_cls_branch) for i in range(self.num_forecast_layers)])
+
+        traj_reg_branch = []
+        for _ in range(self.num_reg_fcs):
+            traj_reg_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
+            traj_reg_branch.append(nn.ReLU())
+        traj_reg_branch.append(nn.Linear(self.embed_dims, 12 * 2))
+        traj_reg_branch = nn.Sequential(*traj_reg_branch)
+        self.traj_reg_branches = nn.ModuleList([copy.deepcopy(traj_reg_branch) for i in range(self.num_forecast_layers)])
+
+        self.learnable_motion_query_embedding = nn.Embedding(
+            self.num_forecast_modes, self.embed_dims)
+
+        self.forecast_det_query_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.embed_dims),
+        )
+        self.forecast_agent_level_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.embed_dims),
+        )
+        self.forecast_scene_level_ego_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.embed_dims),
+        )
+        self.forecast_scene_level_offset_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims, self.embed_dims),
+        )
+        self.intention_interaction_layers = nn.TransformerEncoderLayer(d_model=256,
+                                                                nhead=8,
+                                                                dropout=0.1,
+                                                                dim_feedforward=256*2,
+                                                                batch_first=True)
+        self.static_dynamic_fuser = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims*2),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+        )
+        self.dynamic_embed_fuser = nn.Sequential(
+            nn.Linear(self.embed_dims*3, self.embed_dims*2),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+        )
+        self.in_query_fuser = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims*2),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+        )
+        self.out_query_fuser = nn.Sequential(
+            nn.Linear(self.embed_dims*2, self.embed_dims*2),
+            nn.ReLU(),
+            nn.Linear(self.embed_dims*2, self.embed_dims),
+        )
+        self.detection_agent_interaction_layers = nn.ModuleList(
+            [nn.TransformerDecoderLayer(d_model=256,
+                                        nhead=8,
+                                        dropout=0.1,
+                                        dim_feedforward=256*2,
+                                        batch_first=True) 
+            for i in range(self.num_forecast_layers)])
+        
+        self.unflatten_traj = nn.Unflatten(3, (12, 2))
+        self.log_softmax = nn.LogSoftmax(dim=2)
+
+    def init_weights(self):
+        # follow the official DETR to init parameters
+        # for m in self.modules():
+        #     if hasattr(m, 'weight') and m.weight.dim() > 1:
+        #         xavier_init(m, distribution='uniform')
+        self._is_init = True
+
+    def forward(self, detection_query, detection_reference_pose):
+        B = detection_query.size(0)
+        A = self.num_propagated
+        M = self.num_forecast_modes
+        T = 12
+        
+        # Detection query
+        detection_reference_point = detection_reference_pose[..., :2]
+        detection_reference_point_norm = self.norm_points_2d(detection_reference_point)
+        detection_query_pos = self.forecast_det_query_embedding(pos2posemb2d(detection_reference_point_norm))
+
+        agent_level_anchors = self.kmeans_anchors.to(detection_reference_point.device).detach() # M, 12, 2
+        scene_level_ego_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose) # B, A, M, 12, 2
+        scene_level_offset_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose, with_translation_transform=False)  
+        
+        agent_level_norm = self.norm_points_2d(agent_level_anchors) # M, 12, 2
+        scene_level_ego_norm = self.norm_points_2d(scene_level_ego_anchors) # B, A, M, 12, 2
+        scene_level_offset_norm = self.norm_points_2d(scene_level_offset_anchors)
+
+        agent_level_embedding = self.forecast_agent_level_embedding(pos2posemb2d(agent_level_norm[..., -1, :]))  # M, C
+        scene_level_ego_embedding = self.forecast_scene_level_ego_embedding(pos2posemb2d(scene_level_ego_norm[..., -1, :])) # B, A, M, C
+        scene_level_offset_embedding = self.forecast_scene_level_offset_embedding(pos2posemb2d(scene_level_offset_norm[..., -1, :])) 
+
+        agent_level_embedding = agent_level_embedding[None,None, ...].expand(B, A, -1, -1) # B, A, M, C
+        learnable_query_pos = self.learnable_motion_query_embedding.weight.to(detection_query.device) # M, C
+        learnable_embed = learnable_query_pos[None, None, ...].expand(B, A, -1, -1) # B, A, M, C
+
+        init_reference  = scene_level_offset_anchors
+
+        detection_query_bc = detection_query.unsqueeze(2).expand(-1, -1, M, -1)  # B, A, M, C
+        detection_query_pos_bc = detection_query_pos.unsqueeze(2).expand(-1, -1, M, -1)  # B, A, M, C
+
+        agent_level_embedding = torch.flatten(agent_level_embedding, start_dim=0, end_dim=1) # B*A, M, C
+        agent_level_embedding = self.intention_interaction_layers(agent_level_embedding).view(B, A, M, -1)
+
+        static_intention_embed = agent_level_embedding + scene_level_offset_embedding + learnable_embed
+        reference_trajs_input = init_reference.unsqueeze(4).detach()
+
+        query_embed = torch.zeros_like(static_intention_embed)
+
+        intermediate = []
+        intermediate_reference_trajs = []
+
+        for lid in range(self.num_forecast_layers):
+
+            dynamic_query_embed = self.dynamic_embed_fuser(torch.cat(
+                [agent_level_embedding, scene_level_offset_embedding, scene_level_ego_embedding], dim=-1))
+            
+            query_embed_intention = self.static_dynamic_fuser(torch.cat(
+                [static_intention_embed, dynamic_query_embed], dim=-1))  # B, A, M, C
+            
+            query_embed = self.in_query_fuser(torch.cat([query_embed, query_embed_intention], dim=-1))
+            
+            q_dai = query_embed + detection_query_pos_bc
+            q_dai = torch.flatten(q_dai, start_dim=0, end_dim=1) # B*A, M, C
+            k_dai = (detection_query + detection_query_pos).reshape(B*A, -1).unsqueeze(1).expand(B*A, M, -1) # B, A, C -> B*A, M, C
+            detection_query_embed = self.detection_agent_interaction_layers[lid](q_dai, k_dai).view(B, A, M, -1)
+            
+            query_embed = [detection_query_embed, detection_query_bc+detection_query_pos_bc]
+            query_embed = torch.cat(query_embed, dim=-1)
+            query_embed = self.out_query_fuser(query_embed)
+
+            tmp = self.traj_reg_branches[lid](query_embed)
+            tmp = tmp.view(B, A, M, T, -1)
+
+            tmp[..., :2] = torch.cumsum(tmp[..., :2], dim=3)
+            new_reference_trajs = torch.zeros_like(reference_trajs_input)
+            new_reference_trajs = tmp[..., :2]
+            reference_trajs = new_reference_trajs.detach()
+            reference_trajs_input = reference_trajs.unsqueeze(4)  # B A N 12 NUM_LEVEL  2
+
+            ep_offset_embed = reference_trajs.detach()
+            ep_ego_embed = self.trajectory_coordinate_transform(reference_trajs, detection_reference_pose, with_rotation_transform=False).detach()
+            ep_agent_embed = self.trajectory_coordinate_transform(reference_trajs, detection_reference_pose, with_translation_transform=False).detach()
+
+            agent_level_embedding = self.forecast_agent_level_embedding(pos2posemb2d(self.norm_points_2d(ep_agent_embed[..., -1, :])))
+            scene_level_ego_embedding = self.forecast_scene_level_ego_embedding(pos2posemb2d(self.norm_points_2d(ep_ego_embed[..., -1, :])))
+            scene_level_offset_embedding = self.forecast_scene_level_offset_embedding(pos2posemb2d(self.norm_points_2d(ep_offset_embed[..., -1, :])))
+
+            intermediate.append(query_embed)
+            intermediate_reference_trajs.append(reference_trajs)
+
+        inter_states = torch.stack(intermediate)
+
+        outputs_traj_scores = []
+        outputs_trajs = []
+
+        for lvl in range(inter_states.shape[0]):
+            outputs_class = self.traj_cls_branches[lvl](inter_states[lvl])
+            tmp = self.traj_reg_branches[lvl](inter_states[lvl])
+            tmp = self.unflatten_traj(tmp)
+            
+            # we use cumsum trick here to get the trajectory 
+            tmp[..., :2] = torch.cumsum(tmp[..., :2], dim=3)
+
+            # outputs_class = self.log_softmax(outputs_class.squeeze(3))
+            outputs_traj_scores.append(outputs_class)
+
+            # for bs in range(tmp.shape[0]):
+            #     tmp[bs] = self.bivariate_gaussian_activation(tmp[bs])
+            outputs_trajs.append(tmp)
+        outputs_traj_scores = torch.stack(outputs_traj_scores)
+        outputs_trajs = torch.stack(outputs_trajs)
+
+        return outputs_trajs, outputs_traj_scores
+
+    def anchor_coordinate_transform(self, anchors, ref_poses, with_translation_transform=True, with_rotation_transform=True):
+        """
+        Transform anchor coordinates with respect to detected bounding boxes in the batch.
+
+        Args:
+            anchors (torch.Tensor): A tensor containing the k-means anchor values.
+            ref_poses (torch.Tensor): A tensor of the detection position and rotation each sample in the batch.
+            with_translate (bool, optional): Whether to perform translation transformation. Defaults to True.
+            with_rot (bool, optional): Whether to perform rotation transformation. Defaults to True.
+
+        Returns:
+            torch.Tensor: A tensor containing the transformed anchor coordinates.
+        """
+        ref_poses_vec = ref_poses.clone()
+        # use_velo_for_rot = False
+        # if use_velo_for_rot:
+        #     velo_mag_thresh = 1.0
+        #     velo = self.memory_velo.clone()
+        #     velo_dir = torch.atan2(velo[..., 1], velo[..., 0])
+        #     velo_mag = torch.norm(velo[..., :2], dim=-1)
+        #     ref_poses_vec[..., 2] = torch.where(velo_mag > velo_mag_thresh, velo_dir, ref_poses_vec[..., 2])
+        ref_poses_vec[..., 2] -= torch.tensor(math.pi)/2 
+        ref_poses_mat = self.pose2d_vec_to_mat(ref_poses_vec).unsqueeze(2).unsqueeze(2) # B, A, M, T, 3, 3
+        if not with_translation_transform:
+            ref_poses_mat[..., :2, 2] = 0.0
+        if not with_rotation_transform:
+            ref_poses_mat[..., :2, :2] = torch.eye(2)
+        transformed_anchors = anchors[None, None, ...] # B, A, M, T, 2
+        transformed_anchors = torch.cat([transformed_anchors, torch.ones_like(transformed_anchors[..., :1])], dim=-1) # B, A, M, T, 3
+        transformed_anchors = torch.matmul(ref_poses_mat, transformed_anchors.unsqueeze(-1)).squeeze(-1) # B, A, M, T, 3
+        transformed_anchors = transformed_anchors[..., :2]
+        # viz
+        # import matplotlib.pyplot as plt
+        # import numpy as np
+        # output_path = 'output/uniad_anchors/transformed_anchor_viz.png'
+        # for i in range(transformed_anchors.shape[0]):
+        #     fig1, ax1 = plt.subplots()
+        #     b_id, a_id = i, i 
+        #     for j in range(transformed_anchors.shape[2]):
+        #         points = transformed_anchors[b_id, a_id, j].detach().cpu().numpy()
+        #         ax1.plot(points[:, 0], points[:, 1], 'o-')
+        #     velo = self.memory_velo[b_id, a_id].detach().cpu().numpy()
+        #     angle = ref_poses[b_id, a_id, 2].detach().cpu().numpy()
+        #     pos = ref_poses[b_id, a_id, :2].detach().cpu().numpy()
+        #     ax1.plot([pos[0], pos[0] + 80*np.cos(angle)], [pos[1], pos[1] + 80*np.sin(angle)], '*-', color='r', alpha=0.5, label='ang_pred_80m')
+        #     ax1.plot([pos[0], pos[0] + 6*velo[0]], [pos[1], pos[1] + 6*velo[1]], '*-', color='k', alpha=0.5, label='velo_pred')
+        #     ax1.legend()
+        #     fig1.savefig(output_path)
+        #     plt.close(fig1)
+        #     print(f"Plot saved to {output_path}")
+        #     breakpoint()
+        return transformed_anchors
+
+
+    def trajectory_coordinate_transform(self, trajectory, ref_poses, with_translation_transform=True, with_rotation_transform=True):
+        """
+        Transform trajectory coordinates with respect to detected bounding boxes in the batch.
+        Args:
+            trajectory (torch.Tensor): predicted trajectory.
+            ref_poses (torch.Tensor): A tensor of the detection position and rotation each sample in the batch.
+            with_translate (bool, optional): Whether to perform translation transformation. Defaults to True.
+            with_rot (bool, optional): Whether to perform rotation transformation. Defaults to True.
+
+        Returns:
+            torch.Tensor: A tensor containing the transformed trajectory coordinates.
+        """
+        ref_poses_vec = ref_poses.clone()
+        ref_poses_vec[..., 2] -= torch.tensor(math.pi)/2 
+        ref_poses_vec[..., 2] = -ref_poses_vec[..., 2]
+        ref_poses_mat = self.pose2d_vec_to_mat(ref_poses_vec).unsqueeze(2).unsqueeze(2) # B, A, M, T, 3, 3
+        if not with_translation_transform:
+            ref_poses_mat[..., :2, 2] = 0.0
+        if not with_rotation_transform:
+            ref_poses_mat[..., :2, :2] = torch.eye(2)
+        trajectory = torch.cat([trajectory, torch.ones_like(trajectory[..., :1])], dim=-1) # B, A, M, T, 3
+        trajectory = torch.matmul(ref_poses_mat, trajectory.unsqueeze(-1)).squeeze(-1) # B, A, M, T, 2
+        trajectory = trajectory[..., :2]
+        # viz
+        # import matplotlib.pyplot as plt
+        # import numpy as np
+        # output_path = 'output/uniad_anchors/transformed_anchor_viz.png'
+        # for i in range(trajectory.shape[0]):
+        #     fig1, ax1 = plt.subplots()
+        #     b_id, a_id = i, i 
+        #     for j in range(trajectory.shape[2]):
+        #         points = trajectory[b_id, a_id, j].detach().cpu().numpy()
+        #         ax1.plot(points[:, 0], points[:, 1], 'o-')
+        #     velo = self.memory_velo[b_id, a_id].detach().cpu().numpy()
+        #     angle = ref_poses[b_id, a_id, 2].detach().cpu().numpy()
+        #     pos = ref_poses[b_id, a_id, :2].detach().cpu().numpy()
+        #     ax1.plot([pos[0], pos[0] + 80*np.cos(angle)], [pos[1], pos[1] + 80*np.sin(angle)], '*-', color='r', alpha=0.5, label='ang_pred_80m')
+        #     ax1.plot([pos[0], pos[0] + 6*velo[0]], [pos[1], pos[1] + 6*velo[1]], '*-', color='k', alpha=0.5, label='velo_pred')
+        #     ax1.legend()
+        #     fig1.savefig(output_path)
+        #     plt.close(fig1)
+        #     print(f"Plot saved to {output_path}")
+        #     breakpoint()
+
+        return trajectory
+    
+    def norm_points_2d(self, points):
+        points = (points - self.pc_range[:2]) / (self.pc_range[3:5] - self.pc_range[0:2])
+        return points
+    
+    def bivariate_gaussian_activation(self, ip):
+        """
+        Activation function to output parameters of bivariate Gaussian distribution.
+
+        Args:
+            ip (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor containing the parameters of the bivariate Gaussian distribution.
+        """
+        mu_x = ip[..., 0:1]
+        mu_y = ip[..., 1:2]
+        sig_x = ip[..., 2:3]
+        sig_y = ip[..., 3:4]
+        rho = ip[..., 4:5]
+        sig_x = torch.exp(sig_x)
+        sig_y = torch.exp(sig_y)
+        rho = torch.tanh(rho)
+        out = torch.cat([mu_x, mu_y, sig_x, sig_y, rho], dim=-1)
+        return out
+
+    def pose2d_vec_to_mat(self, pose2d_vec):
+        pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
+        pose2d_mat[..., 0, 0] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0, 1] = -torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 0] = torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 1] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0:2, 2] = pose2d_vec[..., 0:2]
+        return pose2d_mat

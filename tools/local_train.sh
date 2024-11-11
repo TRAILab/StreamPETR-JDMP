@@ -3,7 +3,7 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_mini_attforecast_dec1_noprop_qembsep_bs8_1gpu_freeze_600e
+CONFIG_NAME=jdmp_mini_attforecast_noprop_bs8_1gpu_freezefinetune_60e
 DOCKER_IMG=spapais/streampetr:latest
 
 # Host paths
@@ -36,6 +36,7 @@ CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"
+# --env="TORCH_DISTRIBUTED_DEBUG=DETAIL"
 
 echo "$CONTAINER_CMD"
 eval $CONTAINER_CMD

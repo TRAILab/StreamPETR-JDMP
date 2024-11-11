@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_dec1_noprop_qembsep_bs8_1gpu_freezefinetune_600e',),
+                name='jdmp_mini_attforecast_noprop_bs8_1gpu_freezefinetune_600e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -138,26 +138,13 @@ model = dict(
                                      'ffn', 'norm')),
             )),
         forecast_transformer=dict(
-            type='JDMPTemporalTransformer',
-            decoder=dict(
-                type='PETRTransformerDecoder',
-                return_intermediate=True,
-                num_layers=1,
-                transformerlayers=dict(
-                    type='PETRTemporalDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=256,
-                            num_heads=8,
-                            dropout=0.1),
-                        ],
-                    feedforward_channels=2048,
-                    ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
-                    operation_order=('self_attn', 'norm',
-                                     'ffn', 'norm')),
-            )),
+            type='JDMPForecastTransformer',
+            embed_dims=256, 
+            num_propagated=128, 
+            num_reg_fcs=2, 
+            num_forecast_layers=3,
+            pc_range=point_cloud_range,
+        ),
         bbox_coder=dict(
             type='NMSFreeCoder',
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],

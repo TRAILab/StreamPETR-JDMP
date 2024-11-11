@@ -87,6 +87,7 @@ class JDMPPETRHead(AnchorFreeHead):
                      class_weight=1.0),
                  loss_bbox=dict(type='L1Loss', loss_weight=5.0),
                  loss_forecast=dict(type='L1Loss', loss_weight=5.0),
+                 loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
                  loss_iou=dict(type='GIoULoss', loss_weight=2.0),
                  train_cfg=dict(
                      assigner=dict(
@@ -206,13 +207,13 @@ class JDMPPETRHead(AnchorFreeHead):
         self.act_cfg = detect_transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
         self.num_pred = detect_transformer['decoder']['num_layers']
-        self.num_pred_forecast = forecast_transformer['decoder']['num_layers']
         self.normedlinear = normedlinear
         super(JDMPPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
 
         self.loss_cls = build_loss(loss_cls)
         self.loss_bbox = build_loss(loss_bbox)
         self.loss_forecast = build_loss(loss_forecast)
+        self.loss_forecast_cls = build_loss(loss_forecast_cls)
         self.loss_iou = build_loss(loss_iou)
 
         if self.loss_cls.use_sigmoid:
@@ -276,21 +277,10 @@ class JDMPPETRHead(AnchorFreeHead):
         reg_branch.append(Linear(self.embed_dims, self.code_size))
         reg_branch = nn.Sequential(*reg_branch)
 
-        if self.with_attn_forecast:
-            forecast_reg_branch = []
-            for _ in range(self.num_reg_fcs):
-                forecast_reg_branch.append(Linear(self.embed_dims, self.embed_dims))
-                forecast_reg_branch.append(nn.ReLU())
-            forecast_reg_branch.append(Linear(self.embed_dims, 3))
-            forecast_reg_branch = nn.Sequential(*forecast_reg_branch)
-
         self.cls_branches = nn.ModuleList(
             [fc_cls for _ in range(self.num_pred)])
         self.reg_branches = nn.ModuleList(
             [reg_branch for _ in range(self.num_pred)])
-        if self.with_attn_forecast:
-            self.forecast_reg_branches = nn.ModuleList(
-                [forecast_reg_branch for _ in range(self.num_pred_forecast)])
 
         self.position_encoder = nn.Sequential(
                 nn.Linear(self.position_dim, self.embed_dims*4),
@@ -318,12 +308,12 @@ class JDMPPETRHead(AnchorFreeHead):
             nn.ReLU(),
             nn.Linear(self.embed_dims, self.embed_dims),
         )
-        if self.forecast_emb_sep:
-            self.forecast_query_embedding = nn.Sequential(
-                nn.Linear(self.embed_dims*3//2, self.embed_dims),
-                nn.ReLU(),
-                nn.Linear(self.embed_dims, self.embed_dims),
-            )
+        # if self.forecast_emb_sep:
+        #     self.forecast_query_embedding = nn.Sequential(
+        #         nn.Linear(self.embed_dims*3//2, self.embed_dims),
+        #         nn.ReLU(),
+        #         nn.Linear(self.embed_dims, self.embed_dims),
+        #     )
 
         self.spatial_alignment = MLN(8)
 
@@ -331,22 +321,22 @@ class JDMPPETRHead(AnchorFreeHead):
             nn.Linear(self.embed_dims, self.embed_dims),
             nn.LayerNorm(self.embed_dims)
         )
-        if self.forecast_emb_sep:
-            self.forecast_time_embedding = nn.Sequential(
-            nn.Linear(self.embed_dims, self.embed_dims),
-            nn.LayerNorm(self.embed_dims)
-            )
+        # if self.forecast_emb_sep:
+        #     self.forecast_time_embedding = nn.Sequential(
+        #     nn.Linear(self.embed_dims, self.embed_dims),
+        #     nn.LayerNorm(self.embed_dims)
+        #     )
 
         # encoding ego pose
         if self.with_ego_pos:
             self.ego_pose_pe = MLN(180)
             self.ego_pose_memory = MLN(180)
-        if self.forecast_emb_sep and self.with_forecast_ego_pos:
-            self.forecast_ego_pose_pe = MLN(180)
-            self.forecast_ego_pose_memory = MLN(180)
-        if not self.forecast_emb_sep and self.with_forecast_ego_pos:
-            self.ego_pose_pe = MLN(180)
-            self.ego_pose_memory = MLN(180)
+        # if self.forecast_emb_sep and self.with_forecast_ego_pos:
+        #     self.forecast_ego_pose_pe = MLN(180)
+        #     self.forecast_ego_pose_memory = MLN(180)
+        # if not self.forecast_emb_sep and self.with_forecast_ego_pos:
+        #     self.ego_pose_pe = MLN(180)
+        #     self.ego_pose_memory = MLN(180)
 
         # Map encoder
         if self.with_map_encoder:
@@ -535,56 +525,58 @@ class JDMPPETRHead(AnchorFreeHead):
         return tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose
     
 
-    def forecast_alignment(self, data):
-        B = data['prev_exists'].size(0)
-        A = self.num_propagated
-        M = self.num_forecast_modes
-        T = self.num_forecast_times
-        memory_timestamp = self.memory_timestamp + data['timestamp'].unsqueeze(-1).unsqueeze(-1)
-        memory_timestamp *= -1 # Reverse the time for history (negative timestamps)
-        memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
-        memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
-        temp_reference_point = (memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-        forecast_reference_point = temp_reference_point[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, 3)
-        if self.forecast_emb_sep:
-            temp_pos = self.forecast_query_embedding(pos2posemb3d(temp_reference_point))
-            forecast_pos = self.forecast_query_embedding(pos2posemb3d(forecast_reference_point))
-        else:
-            temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
-            forecast_pos = self.query_embedding(pos2posemb3d(forecast_reference_point))
-        temp_memory = self.memory_embedding
-        forecast_memory = temp_memory[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, temp_memory.size(-1))
+    # def forecast_alignment(self, data):
+    #     B = data['prev_exists'].size(0)
+    #     A = self.num_propagated
+    #     M = self.num_forecast_modes
+    #     T = self.num_forecast_times
+    #     memory_timestamp = self.memory_timestamp + data['timestamp'].unsqueeze(-1).unsqueeze(-1)
+    #     memory_timestamp *= -1 # Reverse the time for history (negative timestamps)
+    #     memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
+    #     memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+    #     temp_reference_point = (memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+    #     forecast_reference_point = temp_reference_point[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, 3)
+    #     if self.forecast_emb_sep:
+    #         temp_pos = self.forecast_query_embedding(pos2posemb3d(temp_reference_point))
+    #         forecast_pos = self.forecast_query_embedding(pos2posemb3d(forecast_reference_point))
+    #     else:
+    #         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
+    #         forecast_pos = self.query_embedding(pos2posemb3d(forecast_reference_point))
+    #     temp_memory = self.memory_embedding
+    #     forecast_memory = temp_memory[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, temp_memory.size(-1))
         
-        if self.with_forecast_ego_pos:
-            memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
-            memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
-            forecast_ego_motion = memory_ego_motion[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).repeat(1, 1, self.num_forecast_modes, self.num_forecast_times, 1)
-            if self.forecast_emb_sep:
-                temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
-                temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
-                forecast_pos = self.forecast_ego_pose_pe(forecast_pos, forecast_ego_motion)
-                forecast_memory = self.forecast_ego_pose_memory(forecast_memory, forecast_ego_motion)
-            else:
-                temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
-                temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
-                forecast_pos = self.ego_pose_pe(forecast_pos, forecast_ego_motion)
-                forecast_memory = self.ego_pose_memory(forecast_memory, forecast_ego_motion)
+    #     if self.with_forecast_ego_pos:
+    #         memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
+    #         memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
+    #         forecast_ego_motion = memory_ego_motion[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).repeat(1, 1, self.num_forecast_modes, self.num_forecast_times, 1)
+    #         if self.forecast_emb_sep:
+    #             temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
+    #             temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
+    #             forecast_pos = self.forecast_ego_pose_pe(forecast_pos, forecast_ego_motion)
+    #             forecast_memory = self.forecast_ego_pose_memory(forecast_memory, forecast_ego_motion)
+    #         else:
+    #             temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
+    #             temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
+    #             forecast_pos = self.ego_pose_pe(forecast_pos, forecast_ego_motion)
+    #             forecast_memory = self.ego_pose_memory(forecast_memory, forecast_ego_motion)
 
-        forecast_timestamp = torch.arange(0, T, device=memory_timestamp.device).expand(B, A, M, T).unsqueeze(-1).float()
-        if self.forecast_emb_sep:
-            temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
-            forecast_pos += self.forecast_time_embedding(pos2posemb1d(forecast_timestamp).float())
-        else: 
-            temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
-            forecast_pos += self.time_embedding(pos2posemb1d(forecast_timestamp).float())
+    #     forecast_timestamp = torch.arange(0, T, device=memory_timestamp.device).expand(B, A, M, T).unsqueeze(-1).float()
+    #     if self.forecast_emb_sep:
+    #         temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
+    #         forecast_pos += self.forecast_time_embedding(pos2posemb1d(forecast_timestamp).float())
+    #     else: 
+    #         temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
+    #         forecast_pos += self.time_embedding(pos2posemb1d(forecast_timestamp).float())
 
-        temp_memory = temp_memory[:, self.num_propagated:]
-        temp_pos = temp_pos[:, self.num_propagated:]
-        forecast_memory = forecast_memory.reshape(B, -1, forecast_memory.size(-1))
-        forecast_pos = forecast_pos.reshape(B, -1, forecast_pos.size(-1))
-        forecast_reference_point = forecast_reference_point.reshape(B, -1, forecast_reference_point.size(-1))
+    #     temp_memory = temp_memory[:, self.num_propagated:]
+    #     temp_memory = torch.zeros_like(temp_memory)
+    #     temp_pos = temp_pos[:, self.num_propagated:]
+    #     forecast_tgt = forecast_memory.reshape(B, -1, forecast_memory.size(-1))
+    #     forecast_tgt = torch.zeros_like(forecast_tgt)
+    #     forecast_pos = forecast_pos.reshape(B, -1, forecast_pos.size(-1))
+    #     forecast_reference_point = forecast_reference_point.reshape(B, -1, forecast_reference_point.size(-1))
             
-        return forecast_memory, forecast_pos, forecast_reference_point, temp_memory, temp_pos
+    #     return forecast_tgt, forecast_pos, forecast_reference_point, temp_memory, temp_pos
 
     def map_encoding(self, sample_idx, global2ego_3dpose_matrix):
         # Params for map encoding TODO: move to config
@@ -953,32 +945,41 @@ class JDMPPETRHead(AnchorFreeHead):
         self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
         
         if self.with_attn_forecast:
+            detection_query = self.memory_embedding[:, :self.num_propagated]
+            memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+            detection_reference_point = memory_reference_point[:, :self.num_propagated, :2]
+            detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
+            detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
+            all_forecast_preds, all_forecast_scores = self.forecast_transformer(detection_query, detection_reference_pose)
             # Prepare for forecasting
-            forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
-                forecast_temp_pos = self.forecast_alignment(data)
-            forecast_attn_mask = None
-            if self.with_map_encoder:
-                sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
-                map_encoding = self.map_encoding(sample_idx, data['ego_pose'])
+            # forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
+            #     forecast_temp_pos = self.forecast_alignment(data)
+            # attn_mask_block = torch.ones(self.num_forecast_times, self.num_forecast_times, dtype=torch.uint8, device=forecast_tgt.device)
+            # identity = torch.eye(self.num_propagated*self.num_forecast_modes, dtype=torch.uint8, device=forecast_tgt.device)
+            # forecast_attn_mask = torch.kron(identity,attn_mask_block).to(forecast_tgt.device) == 0
+            # # forecast_attn_mask = None
+            # if self.with_map_encoder:
+            #     sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+            #     map_encoding = self.map_encoding(sample_idx, data['ego_pose'])
 
-            # Forecasting
-            outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask, forecast_temp_memory, forecast_temp_pos)
-            outs_forecast_dec = torch.nan_to_num(outs_forecast_dec)
-            outputs_forecast_coords = []
-            for lvl in range(outs_forecast_dec.shape[0]):
-                reference = inverse_sigmoid(forecast_reference_points.clone())
-                assert reference.shape[-1] == 3
-                tmp = self.forecast_reg_branches[lvl](outs_forecast_dec[lvl])
+            # # Forecasting
+            # outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask)
+            # outs_forecast_dec = torch.nan_to_num(outs_forecast_dec)
+            # outputs_forecast_coords = []
+            # for lvl in range(outs_forecast_dec.shape[0]):
+            #     reference = inverse_sigmoid(forecast_reference_points.clone())
+            #     assert reference.shape[-1] == 3
+            #     tmp = self.forecast_reg_branches[lvl](outs_forecast_dec[lvl])
 
-                tmp[..., 0:3] += reference
-                tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
+            #     tmp[..., 0:3] += reference
+            #     tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
 
-                outputs_forecast_coord = tmp
-                outputs_forecast_coords.append(outputs_forecast_coord)
+            #     outputs_forecast_coord = tmp
+            #     outputs_forecast_coords.append(outputs_forecast_coord)
 
-            all_forecast_preds = torch.stack(outputs_forecast_coords)
-            all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
-            all_forecast_preds = all_forecast_preds.reshape(outs_forecast_dec.shape[0], B, self.num_propagated, self.num_forecast_times, all_forecast_preds.shape[-1])
+            # all_forecast_preds = torch.stack(outputs_forecast_coords)
+            # all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
+            # all_forecast_preds = all_forecast_preds.reshape(outs_forecast_dec.shape[0], B, self.num_propagated, self.num_forecast_times, all_forecast_preds.shape[-1])
             # TODO: add mode to reshape above and below
 
         elif self.with_velo_forecast:
@@ -1027,6 +1028,8 @@ class JDMPPETRHead(AnchorFreeHead):
                 'dn_mask_dict': None,
             }
         outs['all_forecast_preds'] = all_forecast_preds
+        outs['all_forecast_scores'] = all_forecast_scores
+        outs['all_forecast_reference_points'] = detection_reference_pose
 
         return outs
     
@@ -1052,6 +1055,7 @@ class JDMPPETRHead(AnchorFreeHead):
     def _get_target_single(self,
                            cls_score,
                            bbox_pred,
+                           forecast_score,
                            forecast_pred,
                            gt_labels,
                            gt_bboxes,
@@ -1129,19 +1133,34 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # forecast targets
         code_size = forecast_pred.size(-1)
+        assert code_size == 2
         forecast_weights = torch.zeros_like(forecast_pred)
-        forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
+        forecast_targets = torch.zeros_like(forecast_pred)
+        forecast_labels = torch.zeros_like(forecast_score)
+        forecast_label_weights = torch.zeros_like(forecast_score)
+        gt_forecasting_pos_2d = gt_forecasting_bboxes_3d[..., :2].float()
+        gt_forecasting_pos_2d = (gt_forecasting_pos_2d[:, 1:] - gt_forecasting_pos_2d[:, 0:1]).float().unsqueeze(1)
         if len(matched_pred_inds) > 0:
-            forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, ..., :code_size].float()
-            forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds].float().unsqueeze(-1)
+            forecast_dist = forecast_pred[matched_pred_inds] - gt_forecasting_pos_2d[matched_gt_inds]
+            forecast_ade = forecast_dist.norm(dim=-1).mean(dim=-1)
+            min_ade_inds = forecast_ade.argmin(dim=1)
+            forecast_targets[matched_pred_inds] = gt_forecasting_pos_2d[matched_gt_inds]
+            forecast_weights[matched_pred_inds, min_ade_inds] = gt_forecasting_masks[matched_gt_inds, 1:].float().unsqueeze(-1)
+            forecast_labels[matched_pred_inds, min_ade_inds] = 1
+            forecast_label_weights[matched_pred_inds] = 1
         forecast_targets = forecast_targets.reshape(-1, code_size)
         forecast_weights = forecast_weights.reshape(-1, code_size)
+        forecast_labels = forecast_labels.reshape(-1)
+        forecast_label_weights = forecast_label_weights.reshape(-1)
         return (labels, label_weights, bbox_targets, bbox_weights, 
-                forecast_targets, forecast_weights, pos_inds, neg_inds)
+                forecast_labels, forecast_label_weights, 
+                forecast_targets, forecast_weights, 
+                pos_inds, neg_inds)
 
     def get_targets(self,
                     cls_scores_list,
                     bbox_preds_list,
+                    forecast_scores_list,
                     forecast_preds_list,
                     gt_bboxes_list,
                     gt_labels_list,
@@ -1185,21 +1204,25 @@ class JDMPPETRHead(AnchorFreeHead):
         ]
 
         (labels_list, label_weights_list, bbox_targets_list,
-         bbox_weights_list, forecast_targets_list, forecast_weights_list,
+         bbox_weights_list, forecast_labels_list, forecast_label_weights_list,
+         forecast_targets_list, forecast_weights_list,
          pos_inds_list, neg_inds_list) = multi_apply(
-             self._get_target_single, cls_scores_list, bbox_preds_list, forecast_preds_list,
+             self._get_target_single, cls_scores_list, bbox_preds_list, 
+             forecast_scores_list, forecast_preds_list,
              gt_labels_list, gt_bboxes_list, 
              gt_forecasting_bboxes_3d_list, gt_forecasting_masks_list,
              gt_bboxes_ignore_list)
         num_total_pos = sum((inds.numel() for inds in pos_inds_list))
         num_total_neg = sum((inds.numel() for inds in neg_inds_list))
         return (labels_list, label_weights_list, bbox_targets_list,
-                bbox_weights_list, forecast_targets_list, forecast_weights_list,
+                bbox_weights_list, forecast_labels_list, forecast_label_weights_list,
+                forecast_targets_list, forecast_weights_list,
                 num_total_pos, num_total_neg)
 
     def loss_single(self,
                     cls_scores,
                     bbox_preds,
+                    forecast_scores,
                     forecast_preds,
                     gt_bboxes_list,
                     gt_labels_list,
@@ -1229,17 +1252,22 @@ class JDMPPETRHead(AnchorFreeHead):
         bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
         num_imgs = forecast_preds.size(0)
         forecast_preds_list = [forecast_preds[i] for i in range(num_imgs)]
-        cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, forecast_preds_list,
+        forecast_scores_list = [forecast_scores[i] for i in range(num_imgs)]
+        cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, 
+                                           forecast_scores_list, forecast_preds_list,
                                            gt_bboxes_list, gt_labels_list,
                                            gt_forecasting_bboxes_3d, gt_forecasting_masks,
                                            gt_bboxes_ignore_list)
         (labels_list, label_weights_list, bbox_targets_list, bbox_weights_list,
-         forecast_targets_list, forecast_weights_list, 
+         forecast_labels_list, forecast_label_weights_list,
+         forecast_targets_list, forecast_weights_list,
          num_total_pos, num_total_neg) = cls_reg_targets
         labels = torch.cat(labels_list, 0)
         label_weights = torch.cat(label_weights_list, 0)
         bbox_targets = torch.cat(bbox_targets_list, 0)
         bbox_weights = torch.cat(bbox_weights_list, 0)
+        forecast_labels = torch.cat(forecast_labels_list, 0)
+        forecast_label_weights = torch.cat(forecast_label_weights_list, 0)
         forecast_targets = torch.cat(forecast_targets_list, 0)
         forecast_weights = torch.cat(forecast_weights_list, 0)
 
@@ -1270,15 +1298,27 @@ class JDMPPETRHead(AnchorFreeHead):
         loss_bbox = self.loss_bbox(
                 bbox_preds[isnotnan, :10], normalized_bbox_targets[isnotnan, :10], bbox_weights[isnotnan, :10], avg_factor=num_total_pos)
 
-        # forecast loss
+        # Forecast regression loss
         forecast_avg_factor = torch.hstack([t[:,0].sum() for t in forecast_weights_list]).sum() 
         forecast_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_avg_factor))
         forecast_avg_factor = max(forecast_avg_factor, 1.)
         original_shape = forecast_preds.size()
         forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-1))
         isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
-        loss_forecast = self.loss_forecast(
-            forecast_preds[isnotnan, :2], forecast_targets[isnotnan, :2], forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
+        loss_forecast = self.loss_forecast(forecast_preds[isnotnan, :2], forecast_targets[isnotnan, :2], 
+                                           forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
+        
+        # Forecast probability loss
+        # loss_forecast_class = - torch.squeeze(log_probs.gather(1, inds.unsqueeze(1)))
+        forecast_cls_avg_factor = torch.hstack([t[:].sum() for t in forecast_label_weights_list]).sum() 
+        forecast_cls_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_cls_avg_factor))
+        forecast_cls_avg_factor = max(forecast_cls_avg_factor, 1)
+        forecast_scores = forecast_scores.reshape(-1) 
+        isnotnan = torch.isfinite(forecast_labels).all(dim=-1)
+        loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
+                                                   forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
+
+        # Viz
         if self.viz_forecast_loss:
             import matplotlib.pyplot as plt
             from datetime import datetime
@@ -1291,22 +1331,23 @@ class JDMPPETRHead(AnchorFreeHead):
                 flags = forecast_weights[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
                 labels = ['pred', 'gt']
                 for i in range(flags.shape[0]):
-                    if flags[i].sum() == 0:
-                        continue
-                    pred_pos_i = pred_pos[i][flags[i][:, 0] == 1.0]
-                    gt_pos_i = gt_pos[i][flags[i][:, 0] == 1.0]
-                    plt.plot(pred_pos_i[:,0], pred_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:blue', label=labels[0])
-                    plt.plot(gt_pos_i[:,0], gt_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:orange', label=labels[1])
-                    plt.plot([pred_pos_i[0,0], gt_pos_i[0,0]], [pred_pos_i[0,1], gt_pos_i[0,1]], marker='x', linestyle='--', alpha=0.7, color='tab:grey')
-                    labels = [None, None]
+                    for j in range(flags.shape[1]):
+                        if flags[i,j].sum() == 0:
+                            continue
+                        pred_pos_i = pred_pos[i,j][flags[i,j][:, 0] == 1.0]
+                        gt_pos_i = gt_pos[i,j][flags[i,j][:, 0] == 1.0]
+                        plt.plot(pred_pos_i[:,0], pred_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:blue', label=labels[0])
+                        plt.plot(gt_pos_i[:,0], gt_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:orange', label=labels[1])
+                        plt.plot([pred_pos_i[-1,0], gt_pos_i[-1,0]], [pred_pos_i[-1,1], gt_pos_i[-1,1]], marker='x', linestyle='--', alpha=0.7, color='tab:grey')
+                        labels = [None, None]
                 plt.legend()
                 plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close()
-
         loss_cls = torch.nan_to_num(loss_cls)
         loss_bbox = torch.nan_to_num(loss_bbox)
         loss_forecast = torch.nan_to_num(loss_forecast)
-        return loss_cls, loss_bbox, loss_forecast
+        loss_forecast_cls = torch.nan_to_num(loss_forecast_cls)
+        return loss_cls, loss_bbox, loss_forecast_cls, loss_forecast
 
    
     def dn_loss_single(self,
@@ -1407,6 +1448,7 @@ class JDMPPETRHead(AnchorFreeHead):
 
         all_cls_scores = preds_dicts['all_cls_scores']
         all_bbox_preds = preds_dicts['all_bbox_preds']
+        all_forecast_scores = preds_dicts['all_forecast_scores']
         all_forecast_preds = preds_dicts['all_forecast_preds']
 
         num_dec_layers = len(all_cls_scores)
@@ -1427,8 +1469,8 @@ class JDMPPETRHead(AnchorFreeHead):
             gt_forecasting_masks for _ in range(num_dec_layers)
         ]
 
-        losses_cls, losses_bbox, losses_forecast = multi_apply(
-            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_preds,
+        losses_cls, losses_bbox, losses_forecast_cls, losses_forecast = multi_apply(
+            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_scores, all_forecast_preds,
             all_gt_bboxes_list, all_gt_labels_list,
             all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
             all_gt_bboxes_ignore_list)
@@ -1440,6 +1482,7 @@ class JDMPPETRHead(AnchorFreeHead):
         loss_dict['loss_cls'] = losses_cls[-1]
         loss_dict['loss_bbox'] = losses_bbox[-1]
         loss_dict['loss_forecast'] = losses_forecast[-1]
+        loss_dict['loss_forecast_cls'] = losses_forecast_cls[-1]
 
         # loss from other decoder layers
         num_dec_layer = 0
@@ -1447,9 +1490,13 @@ class JDMPPETRHead(AnchorFreeHead):
                                            losses_bbox[:-1]):
             loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
             loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
-            loss_dict[f'd{num_dec_layer}.loss_forecast'] = losses_forecast[num_dec_layer]
             num_dec_layer += 1
-        
+        num_dec_layer = 0
+        for loss_forecast_i, loss_forecast_cls_i in zip(losses_forecast[:-1],
+                                             losses_forecast_cls[:-1]):
+            loss_dict[f'd{num_dec_layer}.loss_forecast'] = loss_forecast_i
+            loss_dict[f'd{num_dec_layer}.loss_forecast_cls'] = loss_forecast_cls_i
+            num_dec_layer += 1
         if preds_dicts['dn_mask_dict'] is not None:
             known_labels, known_bboxs, output_known_class, output_known_coord, num_tgt = self.prepare_for_loss(preds_dicts['dn_mask_dict'])
             all_known_bboxs_list = [known_bboxs for _ in range(num_dec_layers)]
@@ -1472,9 +1519,11 @@ class JDMPPETRHead(AnchorFreeHead):
                 num_dec_layer += 1
                 
         elif self.with_dn:
-            dn_losses_cls, dn_losses_bbox = multi_apply(
+            dn_losses_cls, dn_losses_bbox, _, _ = multi_apply(
                 self.loss_single, all_cls_scores, all_bbox_preds,
+                all_forecast_scores, all_forecast_preds,
                 all_gt_bboxes_list, all_gt_labels_list, 
+                all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
                 all_gt_bboxes_ignore_list)
             loss_dict['dn_loss_cls'] = dn_losses_cls[-1].detach()
             loss_dict['dn_loss_bbox'] = dn_losses_bbox[-1].detach()     
@@ -1484,7 +1533,6 @@ class JDMPPETRHead(AnchorFreeHead):
                 loss_dict[f'd{num_dec_layer}.dn_loss_cls'] = loss_cls_i.detach()     
                 loss_dict[f'd{num_dec_layer}.dn_loss_bbox'] = loss_bbox_i.detach()     
                 num_dec_layer += 1
-
         return loss_dict
 
 
@@ -1518,9 +1566,16 @@ class JDMPPETRHead(AnchorFreeHead):
         Args:
             preds_dicts (tuple[list[dict]]): Prediction results.
         Returns:
-            torch.tensor: Forecasting results.
+            torch.tensor: Forecasting results (preds, scores, reference_points).
         """
-        ret = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
-        if ret.shape[-1] == 3:
-            ret = ret[..., :2]
+        forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
+        if forecast_preds.shape[-1] == 3:
+            forecast_preds = forecast_preds[..., :2]
+        forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
+        forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
+        forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
+        if forecast_reference_points.shape[-1] == 3:
+            forecast_reference_points = forecast_reference_points[..., :2]
+        forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
+        ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
         return ret

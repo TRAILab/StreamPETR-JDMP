@@ -648,18 +648,6 @@ class JDMPPetr3D(MVXTwoStageDetector):
     def freeze_layers(self):
         for param in self.parameters():
             param.requires_grad = False
-        for param in self.pts_bbox_head.forecast_reg_branches.parameters():
-            param.requires_grad = True
         for param in self.pts_bbox_head.forecast_transformer.parameters():
             param.requires_grad = True
-        for param in self.pts_bbox_head.forecast_query_embedding.parameters():
-            param.requires_grad = True
-        for param in self.pts_bbox_head.forecast_time_embedding.parameters():
-            param.requires_grad = True
-        if self.pts_bbox_head.forecast_emb_sep and self.pts_bbox_head.with_forecast_ego_pos:
-            for param in self.pts_bbox_head.forecast_ego_pose_pe.parameters():
-                param.requires_grad = True
-            for param in self.pts_bbox_head.forecast_ego_pose_memory.parameters():
-                param.requires_grad = True
-
     

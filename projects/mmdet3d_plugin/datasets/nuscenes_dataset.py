@@ -331,7 +331,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         result_files, tmp_dir = super().format_results(results, jsonfile_prefix)
         return result_files, tmp_dir
 
-    def forecast_format(self, forecast_results, jsonfile_prefix=None, match_threshold=2):
+    def forecast_format(self, forecast_results, jsonfile_prefix=None, match_threshold=1):
         """Format the forecast results to json.
 
         Args:
@@ -345,20 +345,27 @@ class CustomNuScenesDataset(NuScenesDataset):
         gts = []
         start_time = time.time()
         for sample_id, forecast in enumerate(forecast_results):
-            # Get gt and forecast positions
+            # Get gt positions
             sample_token = self.data_infos[sample_id]['token']
             if self.data_infos[sample_id]['gt_forecasting_locs'].size == 0:
                 continue
             gt = self.data_infos[sample_id]['gt_forecasting_locs'][:,:,:2]
             gt_cur_positions = gt[:,0]
             gt_pred_positions = gt[:,1:]
-            assert forecast.dim() == 3 # TODO: Add multiple mode forecasts and probabilities from model
+            # Get forecast positions
             if forecast.dim() == 3: # Single mode forecasts
                 forecast = forecast.unsqueeze(1) # [n_agents, n_modes, n_timesteps, n_states]
                 forecast_probs = np.ones((forecast.shape[0], 1))
-            forecast = forecast.detach().cpu().numpy()
-            forecast_cur_positions = forecast[:,0,0]
-            forecast_pred_positions = forecast[:,:,1:]
+                forecast = forecast.detach().cpu().numpy()
+                forecast_cur_positions = forecast[:,0,0]
+                forecast_pred_positions = forecast[:,:,1:]
+            elif forecast.dim() == 4: # Multiple modes forecasts
+                forecast_pred_positions = forecast[..., :2].detach().cpu().numpy()
+                forecast_probs = forecast[..., 0, 2].detach().cpu().numpy()
+                forecast_cur_positions = forecast[:, 0, 0, 3:5].detach().cpu().numpy()
+                forecast_pred_positions = forecast_pred_positions + forecast_cur_positions[:, None, None, :]
+            else:
+                raise ValueError('Forecast dim should be 3 or 4')
 
             # Match forecast to gt
             delta = gt_cur_positions.reshape(-1,1,2) - forecast_cur_positions.reshape(1,-1,2)
