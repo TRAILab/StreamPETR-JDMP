@@ -86,9 +86,10 @@ class JDMPPETRHead(AnchorFreeHead):
                      loss_weight=1.0,
                      class_weight=1.0),
                  loss_bbox=dict(type='L1Loss', loss_weight=5.0),
-                 loss_forecast=dict(type='L1Loss', loss_weight=5.0),
-                 loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
                  loss_iou=dict(type='GIoULoss', loss_weight=2.0),
+                 loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
+                 loss_forecast=dict(type='L1Loss', loss_weight=5.0),                 
+                 assigner_forecast_threshold=2.0,
                  train_cfg=dict(
                      assigner=dict(
                          type='HungarianAssigner3D',
@@ -197,6 +198,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.with_velo_forecast = with_velo_forecast
         self.with_forecast_ego_pos = with_forecast_ego_pos
         self.viz_forecast_loss = viz_forecast_loss
+        self.assigner_forecast_threshold = assigner_forecast_threshold
 
         self.scalar = scalar
         self.bbox_noise_scale = noise_scale
@@ -1119,7 +1121,6 @@ class JDMPPETRHead(AnchorFreeHead):
             labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
         
         # forecast assignment
-        self.forecast_threshold = 2.0 # TODO: add to config
         rec_score = cls_score.sigmoid().topk(1, dim=-1).values
         _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
         topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
@@ -1133,8 +1134,8 @@ class JDMPPETRHead(AnchorFreeHead):
             matched_gt_inds = dist.argmin(dim=1)
             matched_pred_inds = torch.arange(num_bboxes, device=bbox_pred.device)
             matched_dist = dist[matched_pred_inds, matched_gt_inds]
-            matched_gt_inds = matched_gt_inds[matched_dist < self.forecast_threshold]
-            matched_pred_inds = matched_pred_inds[matched_dist < self.forecast_threshold]
+            matched_gt_inds = matched_gt_inds[matched_dist < self.assigner_forecast_threshold]
+            matched_pred_inds = matched_pred_inds[matched_dist < self.assigner_forecast_threshold]
 
         # forecast targets
         code_size = forecast_pred.size(-1)
