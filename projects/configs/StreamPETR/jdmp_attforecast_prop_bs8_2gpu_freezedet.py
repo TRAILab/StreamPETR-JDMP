@@ -49,7 +49,7 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
-    freeze_nonforecast_layers=True,
+    freeze_layer='det_head', # None, 'backbone', 'neck', 'roi_head', 'det_head' supported
     img_backbone=dict(
         init_cfg=dict(
             type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
@@ -159,8 +159,8 @@ model = dict(
             alpha=0.25,
             loss_weight=0.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.0),
-        loss_forecast=dict(type='L1Loss', loss_weight=1.0),
-        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.5),
+        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=0.5),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(

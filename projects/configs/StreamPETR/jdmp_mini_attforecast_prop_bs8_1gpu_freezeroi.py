@@ -49,7 +49,7 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
-    freeze_nonforecast_layers=True,
+    freeze_layer='roi', # None, 'backbone', 'neck', 'roi_head', 'det_head' supported
     img_backbone=dict(
         init_cfg=dict(
             type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
@@ -157,10 +157,10 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=1.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=1.0),
-        loss_forecast=dict(type='L1Loss', loss_weight=1.0),
-        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0),
+            loss_weight=2.0),
+        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.5),
+        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=0.5),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -278,8 +278,8 @@ lr_config = dict(
 
 evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from='output/jdmp_pretrain/jdmp_baseline.pth'
+load_from='ckpts/jdmp_pretrain_baseline.pth'
 resume_from=None

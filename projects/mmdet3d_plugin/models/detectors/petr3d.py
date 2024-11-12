@@ -351,7 +351,7 @@ class JDMPPetr3D(MVXTwoStageDetector):
                  aux_2d_only=True,
                  single_test=False,
                  pretrained=None,
-                 freeze_nonforecast_layers=False):
+                 freeze_layer=None):
         super(JDMPPetr3D, self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
                              img_backbone, pts_backbone, img_neck, pts_neck,
@@ -368,8 +368,8 @@ class JDMPPetr3D(MVXTwoStageDetector):
         self.position_level = position_level
         self.aux_2d_only = aux_2d_only
         self.test_flag = False
-        self.freeze_nonforecast_layers = freeze_nonforecast_layers
-        if self.freeze_nonforecast_layers:
+        self.freeze_layer = freeze_layer
+        if self.freeze_layer:
             self.freeze_layers()
 
     def extract_img_feat(self, img, len_queue=1, training_mode=False):
@@ -646,8 +646,24 @@ class JDMPPetr3D(MVXTwoStageDetector):
         return bbox_list
     
     def freeze_layers(self):
-        for param in self.parameters():
-            param.requires_grad = False
-        for param in self.pts_bbox_head.forecast_transformer.parameters():
-            param.requires_grad = True
+        if self.freeze_layer == 'backbone':
+            for param in self.img_backbone.parameters():
+                param.requires_grad = False
+        if self.freeze_layer == 'neck':
+            for param in self.img_backbone.parameters():
+                param.requires_grad = False
+            for param in self.img_neck.parameters():
+                param.requires_grad = False
+        if self.freeze_layer == 'roi_head':
+            for param in self.img_backbone.parameters():
+                param.requires_grad = False
+            for param in self.img_neck.parameters():
+                param.requires_grad = False
+            for param in self.img_roi_head.parameters():
+                param.requires_grad = False
+        if self.freeze_layer == 'det_head':
+            for param in self.parameters():
+                param.requires_grad = False
+            for param in self.pts_bbox_head.forecast_transformer.parameters():
+                param.requires_grad = True
     

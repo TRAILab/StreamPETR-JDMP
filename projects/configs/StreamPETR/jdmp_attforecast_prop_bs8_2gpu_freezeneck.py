@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_noprop_graddetach_qembshare_6lay_attmem_bs16_1gpu_600e',),
+                name='jdmp_attforecast_prop_bs8_2gpu_finetunedet',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -29,10 +29,10 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
-num_gpus = 1
-batch_size = 16
-num_iters_per_epoch = 323 // (num_gpus * batch_size)
-num_epochs = 600
+num_gpus = 2
+batch_size = 8
+num_iters_per_epoch = 28130 // (num_gpus * batch_size)
+num_epochs = 20
 
 queue_length = 1
 num_frame_losses = 1
@@ -49,6 +49,7 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
+    freeze_layer='neck', # None, 'backbone', 'neck', 'roi_head', 'det_head' supported
     img_backbone=dict(
         init_cfg=dict(
             type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
@@ -104,8 +105,10 @@ model = dict(
         split = 0.75, ###positive rate
         LID=True,
         forecast_emb_sep=False,
-        forecast_mem_update=False,
+        forecast_mem_update=True,
         with_position=True,
+        with_attn_forecast=True,
+        with_velo_forecast=False,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         detect_transformer=dict(
@@ -135,26 +138,13 @@ model = dict(
                                      'ffn', 'norm')),
             )),
         forecast_transformer=dict(
-            type='JDMPTemporalTransformer',
-            decoder=dict(
-                type='PETRTransformerDecoder',
-                return_intermediate=True,
-                num_layers=6,
-                transformerlayers=dict(
-                    type='PETRTemporalDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=256,
-                            num_heads=8,
-                            dropout=0.1),
-                        ],
-                    feedforward_channels=2048,
-                    ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
-                    operation_order=('self_attn', 'norm',
-                                     'ffn', 'norm')),
-            )),
+            type='JDMPForecastTransformer',
+            embed_dims=256, 
+            num_propagated=128, 
+            num_reg_fcs=2, 
+            num_forecast_layers=3,
+            pc_range=point_cloud_range,
+        ),
         bbox_coder=dict(
             type='NMSFreeCoder',
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
@@ -169,7 +159,8 @@ model = dict(
             alpha=0.25,
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.5),
+        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=0.5),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -218,7 +209,7 @@ train_pipeline = [
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_forecasting_bboxes_3d', 'gt_forecasting_masks'] + collect_keys,
-             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d', 'sample_idx'))
+             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d', 'gt_labels_3d', 'sample_idx'))
 ]
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -247,7 +238,7 @@ data = dict(
     train=dict(
         type=dataset_type,
         data_root=data_root,
-        ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl',
+        ann_file=data_root + 'nuscenes2d_temporal_infos_train.pkl',
         num_frame_losses=num_frame_losses,
         seq_split_num=2, # streaming video training
         seq_mode=True, # streaming video training
@@ -260,8 +251,8 @@ data = dict(
         use_valid_flag=True,
         filter_empty_gt=False,
         box_type_3d='LiDAR'),
-    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
-    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_mini_temporal_infos_train.pkl', classes=class_names, modality=input_modality),
+    val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
+    test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
     shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
@@ -287,8 +278,8 @@ lr_config = dict(
 
 evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from=None
+load_from='ckpts/jdmp_pretrain_baseline.pth'
 resume_from=None

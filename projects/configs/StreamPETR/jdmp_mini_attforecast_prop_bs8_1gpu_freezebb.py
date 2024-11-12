@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmp_mini_attforecast_dec1_noprop_qembsep_bs8_1gpu_finetune_lren5_lroi0',),
+                name='jdmp_mini_attforecast_prop_bs8_1gpu_finetunedet_60e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -49,6 +49,7 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
+    freeze_layer='backbone', # None, 'backbone', 'neck', 'roi_head', 'det_head' supported
     img_backbone=dict(
         init_cfg=dict(
             type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
@@ -75,11 +76,11 @@ model = dict(
             type='QualityFocalLoss',
             use_sigmoid=True,
             beta=2.0,
-            loss_weight=0.0),
-        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=0.0),
-        loss_bbox2d=dict(type='L1Loss', loss_weight=0.0),
-        loss_iou2d=dict(type='GIoULoss', loss_weight=0.0),
-        loss_centers2d=dict(type='L1Loss', loss_weight=0.0),
+            loss_weight=2.0),
+        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
+        loss_bbox2d=dict(type='L1Loss', loss_weight=5.0),
+        loss_iou2d=dict(type='GIoULoss', loss_weight=2.0),
+        loss_centers2d=dict(type='L1Loss', loss_weight=10.0),
         train_cfg=dict(
         assigner2d=dict(
             type='HungarianAssigner2D',
@@ -103,8 +104,8 @@ model = dict(
         dn_weight= 1.0, ##dn loss weight
         split = 0.75, ###positive rate
         LID=True,
-        forecast_emb_sep=True,
-        forecast_mem_update=False,
+        forecast_emb_sep=False,
+        forecast_mem_update=True,
         with_position=True,
         with_attn_forecast=True,
         with_velo_forecast=False,
@@ -137,26 +138,13 @@ model = dict(
                                      'ffn', 'norm')),
             )),
         forecast_transformer=dict(
-            type='JDMPTemporalTransformer',
-            decoder=dict(
-                type='PETRTransformerDecoder',
-                return_intermediate=True,
-                num_layers=1,
-                transformerlayers=dict(
-                    type='PETRTemporalDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=256,
-                            num_heads=8,
-                            dropout=0.1),
-                        ],
-                    feedforward_channels=2048,
-                    ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
-                    operation_order=('self_attn', 'norm',
-                                     'ffn', 'norm')),
-            )),
+            type='JDMPForecastTransformer',
+            embed_dims=256, 
+            num_propagated=128, 
+            num_reg_fcs=2, 
+            num_forecast_layers=3,
+            pc_range=point_cloud_range,
+        ),
         bbox_coder=dict(
             type='NMSFreeCoder',
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
@@ -171,7 +159,8 @@ model = dict(
             alpha=0.25,
             loss_weight=2.0),
         loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.25),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.5),
+        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=0.5),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -270,7 +259,7 @@ data = dict(
 
 optimizer = dict(
     type='AdamW', 
-    lr=2e-5, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=2e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
@@ -289,8 +278,8 @@ lr_config = dict(
 
 evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=2*num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from='output/jdmp_pretrain/jdmp_baseline.pth'
+load_from='ckpts/jdmp_pretrain_baseline.pth'
 resume_from=None
