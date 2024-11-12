@@ -1,0 +1,50 @@
+{
+    "seconds": 6,
+    "metrics": [
+        {
+            "k_to_report": [
+                1,
+                6
+            ],
+            "name": "MinFDEK",
+            "aggregators": [
+                {
+                    "name": "RowMean"
+                }
+            ]
+        },
+        {
+            "k_to_report": [
+                1,
+                6
+            ],
+            "name": "MinADEK",
+            "aggregators": [
+                {
+                    "name": "RowMean"
+                }
+            ]
+        },
+        {
+            "k_to_report": [
+                1,
+                6
+            ],
+            "name": "MissRateTopK",
+            "aggregators": [
+                {
+                    "name": "RowMean"
+                }
+            ],
+            "tolerance": 2
+        },
+        {
+            "name": "OffRoadRate",
+            "aggregators": [
+                {
+                    "name": "RowMean"
+                }
+            ]
+        }
+    ]
+}

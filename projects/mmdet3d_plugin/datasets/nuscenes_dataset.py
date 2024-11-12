@@ -17,7 +17,7 @@ import torch
 from nuscenes import NuScenes
 from nuscenes.eval.common.utils import Quaternion
 from nuscenes.eval.prediction.data_classes import Prediction
-from nuscenes.eval.prediction.config import load_prediction_config
+from nuscenes.eval.prediction.config import PredictionConfig
 from nuscenes.prediction import PredictHelper
 from mmcv.parallel import DataContainer as DC
 import random
@@ -415,10 +415,14 @@ class CustomNuScenesDataset(NuScenesDataset):
         """
         print("Evaluating forecast")
         start_time = time.time()
-        config_name = 'predict_2020_icra.json'
+        config_name = 'predict_eval.json'
         nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
         helper = PredictHelper(nusc)
-        config = load_prediction_config(helper, config_name)
+        this_dir = osp.dirname(osp.abspath(__file__))
+        cfg_path = osp.join(this_dir, config_name)
+        assert osp.exists(cfg_path), f'Requested unknown configuration {cfg_path}'
+        config = json.load(open(cfg_path, 'r'))
+        config = PredictionConfig.deserialize(config, helper)
 
         # Aggregate metrics
         n_preds = len(preds)
