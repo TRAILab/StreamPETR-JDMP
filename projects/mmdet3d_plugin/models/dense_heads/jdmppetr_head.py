@@ -1006,6 +1006,10 @@ class JDMPPETRHead(AnchorFreeHead):
                 rec_velo.unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) * pred_dts
             # all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) # Stationary forecast
             # TODO: check how this affects loss computation
+            all_forecast_preds = all_forecast_preds.unsqueeze(3)
+            all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
+            detection_reference_pose = rec_reference_points[-1]
+            all_forecast_preds = all_forecast_preds[..., 1:, 0:2] - all_forecast_preds[..., 0:1, 0:2]
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
             max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
             max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
@@ -1034,17 +1038,9 @@ class JDMPPETRHead(AnchorFreeHead):
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict': None,
             }
-        if self.with_attn_forecast:
-            outs['all_forecast_preds'] = all_forecast_preds
-            outs['all_forecast_scores'] = all_forecast_scores
-            outs['all_forecast_reference_points'] = detection_reference_pose
-        elif self.with_velo_forecast:
-            detection_reference_point = all_forecast_preds[..., 0:1, :2]
-            all_forecast_preds = all_forecast_preds[..., 1:, :2] - detection_reference_point
-            all_forecast_preds = all_forecast_preds.unsqueeze(3)
-            outs['all_forecast_preds'] = all_forecast_preds
-            outs['all_forecast_scores'] = torch.ones_like(all_forecast_preds[..., 0:1, 0])
-            outs['all_forecast_reference_points'] = detection_reference_point[0,:,:,0,:2]
+        outs['all_forecast_preds'] = all_forecast_preds
+        outs['all_forecast_scores'] = all_forecast_scores
+        outs['all_forecast_reference_points'] = detection_reference_pose
 
         return outs
     
@@ -1168,10 +1164,10 @@ class JDMPPETRHead(AnchorFreeHead):
             forecast_labels = forecast_labels.reshape(-1)
             forecast_label_weights = forecast_label_weights.reshape(-1)
         else:
-            forecast_weights = torch.zeros_like(forecast_pred)
-            forecast_targets = torch.zeros_like(forecast_pred)
-            forecast_labels = torch.zeros_like(forecast_score)
-            forecast_label_weights = torch.zeros_like(forecast_score)
+            forecast_weights = torch.zeros_like(bbox_weights)
+            forecast_targets = torch.zeros_like(bbox_targets)
+            forecast_labels = torch.zeros_like(labels)
+            forecast_label_weights = torch.zeros_like(label_weights)
         return (labels, label_weights, bbox_targets, bbox_weights, 
                 forecast_labels, forecast_label_weights, 
                 forecast_targets, forecast_weights, 
@@ -1339,8 +1335,8 @@ class JDMPPETRHead(AnchorFreeHead):
             loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
                                                     forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
         else:
-            loss_forecast = torch.tensor(0.0).to(loss_bbox.device)
-            loss_forecast_cls = torch.tensor(0.0).to(loss_bbox.device)
+            loss_forecast = torch.zeros_like(loss_bbox)
+            loss_forecast_cls = torch.zeros_like(loss_cls)
 
         # Viz
         if self.viz_forecast_loss and self.with_attn_forecast:
@@ -1592,16 +1588,14 @@ class JDMPPETRHead(AnchorFreeHead):
         Returns:
             torch.tensor: Forecasting results (preds, scores, reference_points).
         """
-        ret = None
-        if self.with_attn_forecast or self.with_velo_forecast:
-            forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
-            if forecast_preds.shape[-1] == 3:
-                forecast_preds = forecast_preds[..., :2]
-            forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
-            forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
-            forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
-            if forecast_reference_points.shape[-1] == 3:
-                forecast_reference_points = forecast_reference_points[..., :2]
-            forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
-            ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
+        forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
+        if forecast_preds.shape[-1] == 3:
+            forecast_preds = forecast_preds[..., :2]
+        forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
+        forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
+        forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
+        if forecast_reference_points.shape[-1] == 3:
+            forecast_reference_points = forecast_reference_points[..., :2]
+        forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
+        ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
         return ret
