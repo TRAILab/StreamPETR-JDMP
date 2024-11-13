@@ -353,13 +353,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             gt_cur_positions = gt[:,0]
             gt_pred_positions = gt[:,1:]
             # Get forecast positions
-            if forecast.dim() == 3: # Single mode forecasts
-                forecast = forecast.unsqueeze(1) # [n_agents, n_modes, n_timesteps, n_states]
-                forecast_probs = np.ones((forecast.shape[0], 1))
-                forecast = forecast.detach().cpu().numpy()
-                forecast_cur_positions = forecast[:,0,0]
-                forecast_pred_positions = forecast[:,:,1:]
-            elif forecast.dim() == 4: # Multiple modes forecasts
+            if forecast.dim() == 4: # Multiple modes forecasts
                 forecast_pred_positions = forecast[..., :2].detach().cpu().numpy()
                 forecast_probs = forecast[..., 0, 2].detach().cpu().numpy()
                 forecast_cur_positions = forecast[:, 0, 0, 3:5].detach().cpu().numpy()

@@ -1034,9 +1034,17 @@ class JDMPPETRHead(AnchorFreeHead):
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict': None,
             }
-        outs['all_forecast_preds'] = all_forecast_preds
-        outs['all_forecast_scores'] = all_forecast_scores
-        outs['all_forecast_reference_points'] = detection_reference_pose
+        if self.with_attn_forecast:
+            outs['all_forecast_preds'] = all_forecast_preds
+            outs['all_forecast_scores'] = all_forecast_scores
+            outs['all_forecast_reference_points'] = detection_reference_pose
+        elif self.with_velo_forecast:
+            detection_reference_point = all_forecast_preds[..., 0:1, :2]
+            all_forecast_preds = all_forecast_preds[..., 1:, :2] - detection_reference_point
+            all_forecast_preds = all_forecast_preds.unsqueeze(3)
+            outs['all_forecast_preds'] = all_forecast_preds
+            outs['all_forecast_scores'] = torch.ones_like(all_forecast_preds[..., 0:1, 0])
+            outs['all_forecast_reference_points'] = detection_reference_point[0,:,:,0,:2]
 
         return outs
     
@@ -1120,44 +1128,50 @@ class JDMPPETRHead(AnchorFreeHead):
             bbox_weights[pos_inds] = 1.0
             labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
         
-        # forecast assignment
-        rec_score = cls_score.sigmoid().topk(1, dim=-1).values
-        _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
-        topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
-        num_gts, num_bboxes = gt_bboxes.size(0), topk_bbox_pred.size(0)
-        if num_gts == 0 or num_bboxes == 0:
-            matched_pred_inds = torch.tensor([], device=bbox_pred.device)
-            matched_gt_inds = torch.tensor([], device=bbox_pred.device)
-        else:       
-            dist = torch.cdist(topk_bbox_pred[:, :3], gt_bboxes[:, :3], p=2)
-            dist = torch.nan_to_num(dist, nan=100.0, posinf=100.0, neginf=-100.0)
-            matched_gt_inds = dist.argmin(dim=1)
-            matched_pred_inds = torch.arange(num_bboxes, device=bbox_pred.device)
-            matched_dist = dist[matched_pred_inds, matched_gt_inds]
-            matched_gt_inds = matched_gt_inds[matched_dist < self.assigner_forecast_threshold]
-            matched_pred_inds = matched_pred_inds[matched_dist < self.assigner_forecast_threshold]
+        if self.with_attn_forecast:
+            # forecast assignment
+            rec_score = cls_score.sigmoid().topk(1, dim=-1).values
+            _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
+            topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
+            num_gts, num_bboxes = gt_bboxes.size(0), topk_bbox_pred.size(0)
+            if num_gts == 0 or num_bboxes == 0:
+                matched_pred_inds = torch.tensor([], device=bbox_pred.device)
+                matched_gt_inds = torch.tensor([], device=bbox_pred.device)
+            else:       
+                dist = torch.cdist(topk_bbox_pred[:, :3], gt_bboxes[:, :3], p=2)
+                dist = torch.nan_to_num(dist, nan=100.0, posinf=100.0, neginf=-100.0)
+                matched_gt_inds = dist.argmin(dim=1)
+                matched_pred_inds = torch.arange(num_bboxes, device=bbox_pred.device)
+                matched_dist = dist[matched_pred_inds, matched_gt_inds]
+                matched_gt_inds = matched_gt_inds[matched_dist < self.assigner_forecast_threshold]
+                matched_pred_inds = matched_pred_inds[matched_dist < self.assigner_forecast_threshold]
 
-        # forecast targets
-        code_size = forecast_pred.size(-1)
-        assert code_size == 2
-        forecast_weights = torch.zeros_like(forecast_pred)
-        forecast_targets = torch.zeros_like(forecast_pred)
-        forecast_labels = torch.zeros_like(forecast_score)
-        forecast_label_weights = torch.zeros_like(forecast_score)
-        gt_forecasting_pos_2d = gt_forecasting_bboxes_3d[..., :2].float()
-        gt_forecasting_pos_2d = (gt_forecasting_pos_2d[:, 1:] - gt_forecasting_pos_2d[:, 0:1]).float().unsqueeze(1)
-        if len(matched_pred_inds) > 0:
-            forecast_dist = forecast_pred[matched_pred_inds] - gt_forecasting_pos_2d[matched_gt_inds]
-            forecast_ade = forecast_dist.norm(dim=-1).mean(dim=-1)
-            min_ade_inds = forecast_ade.argmin(dim=1)
-            forecast_targets[matched_pred_inds] = gt_forecasting_pos_2d[matched_gt_inds]
-            forecast_weights[matched_pred_inds, min_ade_inds] = gt_forecasting_masks[matched_gt_inds, 1:].float().unsqueeze(-1)
-            forecast_labels[matched_pred_inds, min_ade_inds] = 1
-            forecast_label_weights[matched_pred_inds] = 1
-        forecast_targets = forecast_targets.reshape(-1, code_size)
-        forecast_weights = forecast_weights.reshape(-1, code_size)
-        forecast_labels = forecast_labels.reshape(-1)
-        forecast_label_weights = forecast_label_weights.reshape(-1)
+            # forecast targets
+            code_size = forecast_pred.size(-1)
+            assert code_size == 2
+            forecast_weights = torch.zeros_like(forecast_pred)
+            forecast_targets = torch.zeros_like(forecast_pred)
+            forecast_labels = torch.zeros_like(forecast_score)
+            forecast_label_weights = torch.zeros_like(forecast_score)
+            gt_forecasting_pos_2d = gt_forecasting_bboxes_3d[..., :2].float()
+            gt_forecasting_pos_2d = (gt_forecasting_pos_2d[:, 1:] - gt_forecasting_pos_2d[:, 0:1]).float().unsqueeze(1)
+            if len(matched_pred_inds) > 0:
+                forecast_dist = forecast_pred[matched_pred_inds] - gt_forecasting_pos_2d[matched_gt_inds]
+                forecast_ade = forecast_dist.norm(dim=-1).mean(dim=-1)
+                min_ade_inds = forecast_ade.argmin(dim=1)
+                forecast_targets[matched_pred_inds] = gt_forecasting_pos_2d[matched_gt_inds]
+                forecast_weights[matched_pred_inds, min_ade_inds] = gt_forecasting_masks[matched_gt_inds, 1:].float().unsqueeze(-1)
+                forecast_labels[matched_pred_inds, min_ade_inds] = 1
+                forecast_label_weights[matched_pred_inds] = 1
+            forecast_targets = forecast_targets.reshape(-1, code_size)
+            forecast_weights = forecast_weights.reshape(-1, code_size)
+            forecast_labels = forecast_labels.reshape(-1)
+            forecast_label_weights = forecast_label_weights.reshape(-1)
+        else:
+            forecast_weights = torch.zeros_like(forecast_pred)
+            forecast_targets = torch.zeros_like(forecast_pred)
+            forecast_labels = torch.zeros_like(forecast_score)
+            forecast_label_weights = torch.zeros_like(forecast_score)
         return (labels, label_weights, bbox_targets, bbox_weights, 
                 forecast_labels, forecast_label_weights, 
                 forecast_targets, forecast_weights, 
@@ -1304,28 +1318,32 @@ class JDMPPETRHead(AnchorFreeHead):
         loss_bbox = self.loss_bbox(
                 bbox_preds[isnotnan, :10], normalized_bbox_targets[isnotnan, :10], bbox_weights[isnotnan, :10], avg_factor=num_total_pos)
 
-        # Forecast regression loss
-        forecast_avg_factor = torch.hstack([t[:,0].sum() for t in forecast_weights_list]).sum() 
-        forecast_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_avg_factor))
-        forecast_avg_factor = max(forecast_avg_factor, 1.)
-        original_shape = forecast_preds.size()
-        forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-1))
-        isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
-        loss_forecast = self.loss_forecast(forecast_preds[isnotnan, :2], forecast_targets[isnotnan, :2], 
-                                           forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
-        
-        # Forecast probability loss
-        # loss_forecast_class = - torch.squeeze(log_probs.gather(1, inds.unsqueeze(1)))
-        forecast_cls_avg_factor = torch.hstack([t[:].sum() for t in forecast_label_weights_list]).sum() 
-        forecast_cls_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_cls_avg_factor))
-        forecast_cls_avg_factor = max(forecast_cls_avg_factor, 1)
-        forecast_scores = forecast_scores.reshape(-1) 
-        isnotnan = torch.isfinite(forecast_labels).all(dim=-1)
-        loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
-                                                   forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
+        if self.with_attn_forecast:
+            # Forecast regression loss
+            forecast_avg_factor = torch.hstack([t[:,0].sum() for t in forecast_weights_list]).sum() 
+            forecast_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_avg_factor))
+            forecast_avg_factor = max(forecast_avg_factor, 1.)
+            original_shape = forecast_preds.size()
+            forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-1))
+            isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
+            loss_forecast = self.loss_forecast(forecast_preds[isnotnan, :2], forecast_targets[isnotnan, :2], 
+                                            forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
+            
+            # Forecast probability loss
+            # loss_forecast_class = - torch.squeeze(log_probs.gather(1, inds.unsqueeze(1)))
+            forecast_cls_avg_factor = torch.hstack([t[:].sum() for t in forecast_label_weights_list]).sum() 
+            forecast_cls_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_cls_avg_factor))
+            forecast_cls_avg_factor = max(forecast_cls_avg_factor, 1)
+            forecast_scores = forecast_scores.reshape(-1) 
+            isnotnan = torch.isfinite(forecast_labels).all(dim=-1)
+            loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
+                                                    forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
+        else:
+            loss_forecast = torch.tensor(0.0).to(loss_bbox.device)
+            loss_forecast_cls = torch.tensor(0.0).to(loss_bbox.device)
 
         # Viz
-        if self.viz_forecast_loss:
+        if self.viz_forecast_loss and self.with_attn_forecast:
             import matplotlib.pyplot as plt
             from datetime import datetime
             import os
@@ -1574,14 +1592,16 @@ class JDMPPETRHead(AnchorFreeHead):
         Returns:
             torch.tensor: Forecasting results (preds, scores, reference_points).
         """
-        forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
-        if forecast_preds.shape[-1] == 3:
-            forecast_preds = forecast_preds[..., :2]
-        forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
-        forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
-        forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
-        if forecast_reference_points.shape[-1] == 3:
-            forecast_reference_points = forecast_reference_points[..., :2]
-        forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
-        ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
+        ret = None
+        if self.with_attn_forecast or self.with_velo_forecast:
+            forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
+            if forecast_preds.shape[-1] == 3:
+                forecast_preds = forecast_preds[..., :2]
+            forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
+            forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
+            forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
+            if forecast_reference_points.shape[-1] == 3:
+                forecast_reference_points = forecast_reference_points[..., :2]
+            forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
+            ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
         return ret
