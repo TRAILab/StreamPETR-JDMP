@@ -387,7 +387,8 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
-            # self.memory_timestamp[:, :self.num_propagated] = 0
+            # if self.with_attn_forecast or self.with_velo_forecast:
+            #     self.memory_timestamp[:, :self.num_propagated] = 0
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
             self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
             self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])
@@ -949,7 +950,7 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.with_attn_forecast:
             detection_query = self.memory_embedding[:, :self.num_propagated]
             memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
-            detection_reference_point = memory_reference_point[:, :self.num_propagated, :2]
+            detection_reference_point = memory_reference_point[:, :self.num_propagated]
             detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
             detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
             all_forecast_preds, all_forecast_scores = self.forecast_transformer(detection_query, detection_reference_pose)
@@ -1008,17 +1009,18 @@ class JDMPPETRHead(AnchorFreeHead):
             # TODO: check how this affects loss computation
             all_forecast_preds = all_forecast_preds.unsqueeze(3)
             all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
-            detection_reference_pose = rec_reference_points[-1]
+            detection_reference_point = rec_reference_points[-1]
             all_forecast_preds = all_forecast_preds[..., 1:, 0:2] - all_forecast_preds[..., 0:1, 0:2]
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
             max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
             max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
             selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
-            forecast_points = transform_reference_points(self.memory_reference_point[:, :self.num_propagated], data['ego_pose_inv'], reverse=False)
-            forecast_points[...,:2] = selected_preds + detection_reference_point
+            selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)
+            forecast_points = selected_preds + detection_reference_point
             forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
             self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
-            # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
+            self.memory_velo[:, :self.num_propagated] = selected_preds[...,:2].detach().clone()
+            # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach().clone()
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
@@ -1040,7 +1042,7 @@ class JDMPPETRHead(AnchorFreeHead):
             }
         outs['all_forecast_preds'] = all_forecast_preds
         outs['all_forecast_scores'] = all_forecast_scores
-        outs['all_forecast_reference_points'] = detection_reference_pose
+        outs['all_forecast_reference_points'] = detection_reference_point
 
         return outs
     
