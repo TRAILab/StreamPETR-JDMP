@@ -1013,7 +1013,7 @@ class JDMPPETRHead(AnchorFreeHead):
             forecast_points = transform_reference_points(self.memory_reference_point[:, :self.num_propagated], data['ego_pose_inv'], reverse=False)
             forecast_points[...,:2] = selected_preds + detection_reference_point
             forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
-            self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach()
+            self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
             # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
         if mask_dict and mask_dict['pad_size'] > 0:

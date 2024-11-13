@@ -369,7 +369,7 @@ class JDMPPetr3D(MVXTwoStageDetector):
         self.aux_2d_only = aux_2d_only
         self.test_flag = False
         self.freeze_layer = freeze_layer
-        if self.freeze_layer:
+        if self.freeze_layer: #and self.training:
             self.freeze_layers()
 
     def extract_img_feat(self, img, len_queue=1, training_mode=False):
@@ -647,14 +647,20 @@ class JDMPPetr3D(MVXTwoStageDetector):
     
     def freeze_layers(self):
         if self.freeze_layer == 'backbone':
+            self.img_backbone.eval()
             for param in self.img_backbone.parameters():
                 param.requires_grad = False
         if self.freeze_layer == 'neck':
+            self.img_backbone.eval()
+            self.img_neck.eval()
             for param in self.img_backbone.parameters():
                 param.requires_grad = False
             for param in self.img_neck.parameters():
                 param.requires_grad = False
         if self.freeze_layer == 'roi_head':
+            self.img_backbone.eval()
+            self.img_neck.eval()
+            self.img_roi_head.eval()
             for param in self.img_backbone.parameters():
                 param.requires_grad = False
             for param in self.img_neck.parameters():
@@ -662,8 +668,10 @@ class JDMPPetr3D(MVXTwoStageDetector):
             for param in self.img_roi_head.parameters():
                 param.requires_grad = False
         if self.freeze_layer == 'det_head':
+            self.eval()
             for param in self.parameters():
                 param.requires_grad = False
+            self.pts_bbox_head.forecast_transformer.train()
             for param in self.pts_bbox_head.forecast_transformer.parameters():
                 param.requires_grad = True
     
