@@ -350,6 +350,14 @@ class JDMPPETRHead(AnchorFreeHead):
             self.map_node_encoder = nn.GRU(self.map_emb_size, self.map_enc_size, batch_first=True)
             self.map_leaky_relu = nn.LeakyReLU()
 
+        if self.with_attn_forecast and self.forecast_mem_update:
+            self.query_fuser = nn.Sequential(
+                nn.Linear(self.embed_dims*2, self.embed_dims*2),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims*2, self.embed_dims),
+            )
+
+
     def init_weights(self):
         """Initialize weights of the transformer head."""
         # The initialization for transformer is important
@@ -368,6 +376,7 @@ class JDMPPETRHead(AnchorFreeHead):
 
     def reset_memory(self):
         self.memory_embedding = None
+        self.memory_embedding_forecast = None
         self.memory_reference_point = None
         self.memory_timestamp = None
         self.memory_egopose = None
@@ -380,6 +389,7 @@ class JDMPPETRHead(AnchorFreeHead):
         # refresh the memory when the scene changes
         if self.memory_embedding is None:
             self.memory_embedding = x.new_zeros(B, self.memory_len, self.embed_dims)
+            self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
             self.memory_reference_point = x.new_zeros(B, self.memory_len, 3)
             self.memory_timestamp = x.new_zeros(B, self.memory_len, 1)
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
@@ -387,8 +397,8 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
-            # if self.with_attn_forecast or self.with_velo_forecast:
-            #     self.memory_timestamp[:, :self.num_propagated] = 0
+            if self.with_attn_forecast and self.forecast_mem_update:
+                self.memory_timestamp[:, :self.num_propagated] = 0
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
             self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
             self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])
@@ -397,6 +407,7 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_timestamp = memory_refresh(self.memory_timestamp[:, :self.memory_len], x)
             self.memory_reference_point = memory_refresh(self.memory_reference_point[:, :self.memory_len], x)
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
+            self.memory_embedding_forecast = memory_refresh(self.memory_embedding_forecast[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
             self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
@@ -500,8 +511,11 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.with_velo_forecast:
             prop_mem_ref_point[:, self.num_propagated:] = self.memory_reference_point[:, self.num_propagated:] + torch.nn.functional.pad(self.memory_velo[:, self.num_propagated:], (0,1)) * self.memory_timestamp[:, self.num_propagated:].float()
         temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-        temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
-        temp_memory = self.memory_embedding
+        temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point))
+        if self.with_attn_forecast and self.forecast_mem_update:
+            temp_memory = self.query_fuser(torch.cat([self.memory_embedding, self.memory_embedding_forecast], dim=-1))
+        else:
+            temp_memory = self.memory_embedding 
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
         
         if self.with_ego_pos:
@@ -950,6 +964,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.forecast_all = True        
         if self.with_attn_forecast:
             if self.forecast_all:
+                self.forecast_transformer.num_propagated = self.num_propagated + self.num_query
                 if self.training and mask_dict and mask_dict['pad_size'] > 0:
                     detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
                     detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
@@ -971,7 +986,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 detection_reference_point = memory_reference_point[:, :self.num_propagated]
                 detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
             detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
-            all_forecast_preds, all_forecast_scores = self.forecast_transformer(detection_query, detection_reference_pose)
+            all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose)
             # Prepare for forecasting
             # forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
             #     forecast_temp_pos = self.forecast_alignment(data)
@@ -1046,7 +1061,17 @@ class JDMPPETRHead(AnchorFreeHead):
                 selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
             self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
             self.memory_velo[:, :self.num_propagated] = selected_preds[...,:2].detach().clone()
-            # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach().clone()
+            if self.with_attn_forecast: 
+                forecast_query = all_forecast_query[-1].detach().clone() # [8, 428, 18, 256]
+                forecast_scores_squeezed = all_forecast_scores[-1].squeeze(-1)  # Shape: [8, 428, 18]
+                _, max_indices = torch.max(forecast_scores_squeezed, dim=2)  # max_indices shape: [8, 428]
+                max_indices_expanded = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [8, 428, 1, 1]
+                max_indices_expanded = max_indices_expanded.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [8, 428, 1, 256]
+                forecast_query = torch.gather(forecast_query, dim=2, index=max_indices_expanded)  # Shape: [8, 428, 1, 256]
+                forecast_query = forecast_query.squeeze(2)  # Final shape: [8, 428, 256]
+                expanded_topk_indexes = topk_indexes.expand(-1, -1, forecast_query.size(2)) # [8, 128, 256]
+                forecast_query = torch.gather(forecast_query, dim=1, index=expanded_topk_indexes) # [8, 128, 256]
+                self.memory_embedding_forecast = torch.cat([forecast_query.detach().clone(), self.memory_embedding_forecast], dim=1)
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]

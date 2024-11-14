@@ -341,7 +341,7 @@ class CustomNuScenesDataset(NuScenesDataset):
                 If not specified, a temp file will be created. Default: None.
         """
         print('\nFormatting forecasts')
-        export_full_preds = True
+        export_full_preds = False
         preds = []
         preds_full = []
         gts = []

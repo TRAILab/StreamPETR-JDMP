@@ -1091,7 +1091,7 @@ class JDMPForecastTransformer(BaseModule):
         outputs_traj_scores = torch.stack(outputs_traj_scores)
         outputs_trajs = torch.stack(outputs_trajs)
 
-        return outputs_trajs, outputs_traj_scores
+        return outputs_trajs, outputs_traj_scores, inter_states
 
     def anchor_coordinate_transform(self, anchors, ref_poses, with_translation_transform=True, with_rotation_transform=True):
         """
