@@ -341,7 +341,9 @@ class CustomNuScenesDataset(NuScenesDataset):
                 If not specified, a temp file will be created. Default: None.
         """
         print('\nFormatting forecasts')
+        export_full_preds = True
         preds = []
+        preds_full = []
         gts = []
         start_time = time.time()
         for sample_id, forecast in enumerate(forecast_results):
@@ -360,6 +362,16 @@ class CustomNuScenesDataset(NuScenesDataset):
                 forecast_pred_positions = forecast_pred_positions + forecast_cur_positions[:, None, None, :]
             else:
                 raise ValueError('Forecast dim should be 4')
+
+            if export_full_preds:
+                forecast_pred_positions_full = np.concatenate((forecast_cur_positions[:, None, None, :], forecast_pred_positions),axis=2)
+                pred_ids = np.arange(len(forecast))
+                for pred_id in pred_ids:
+                    instance_token = '0' # Not needed
+                    sample_token = self.data_infos[sample_id]['token']
+                    pred = forecast_pred_positions_full[pred_id]
+                    prob = forecast_probs[pred_id]
+                    preds_full.append(Prediction(instance_token, sample_token, pred, prob).serialize())
 
             # Match forecast to gt
             delta = gt_cur_positions.reshape(-1,1,2) - forecast_cur_positions.reshape(1,-1,2)
@@ -390,6 +402,9 @@ class CustomNuScenesDataset(NuScenesDataset):
             mmcv.mkdir_or_exist(jsonfile_prefix)
             path = osp.join(jsonfile_prefix, 'results_nusc.json')
             json.dump(preds, open(path, "w"), indent=2)
+            if export_full_preds:
+                path = osp.join(jsonfile_prefix, 'results_nusc_full.json')
+                json.dump(preds, open(path, "w"), indent=2)
 
         return preds, gts
 

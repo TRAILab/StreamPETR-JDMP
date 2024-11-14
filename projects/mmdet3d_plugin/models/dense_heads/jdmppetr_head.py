@@ -947,11 +947,29 @@ class JDMPPETRHead(AnchorFreeHead):
         # update the memory bank
         self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
         
+        self.forecast_all = True        
         if self.with_attn_forecast:
-            detection_query = self.memory_embedding[:, :self.num_propagated]
-            memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
-            detection_reference_point = memory_reference_point[:, :self.num_propagated]
-            detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
+            if self.forecast_all:
+                if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                    detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
+                    detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
+                    detection_reference_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                    detection_reference_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
+                    detection_reference_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
+                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
+                else:
+                    detection_reference_point = all_bbox_preds[..., :3][-1]
+                    detection_query = outs_dec[-1]
+                    detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                    detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
+                    detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
+                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
+                _, topk_indexes = torch.topk(detection_reference_score, self.topk_proposals, dim=1)
+            else:
+                detection_query = self.memory_embedding[:, :self.num_propagated]
+                memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+                detection_reference_point = memory_reference_point[:, :self.num_propagated]
+                detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
             detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
             all_forecast_preds, all_forecast_scores = self.forecast_transformer(detection_query, detection_reference_pose)
             # Prepare for forecasting
@@ -994,11 +1012,14 @@ class JDMPPETRHead(AnchorFreeHead):
                 rec_reference_points = all_bbox_preds[..., :3]
                 rec_velo = all_bbox_preds[..., -2:]
                 rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
-            _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
-            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
-            rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
-            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
-            rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
+            if not self.forecast_all:
+                _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
+                rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
+                rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
+            else:
+                _, topk_indexes = torch.topk(rec_score[-1], self.topk_proposals, dim=1)
             # rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
             # all_forecast_preds = rec_reference_points + rec_velo * 0.5
             num_future_frames = 12
@@ -1018,6 +1039,11 @@ class JDMPPETRHead(AnchorFreeHead):
             selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)
             forecast_points = selected_preds + detection_reference_point
             forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
+            if self.forecast_all:
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, forecast_points.shape[-1])
+                forecast_points = torch.gather(forecast_points, 1, topk_indexes_expanded)
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, selected_preds.shape[-1])
+                selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
             self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
             self.memory_velo[:, :self.num_propagated] = selected_preds[...,:2].detach().clone()
             # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach().clone()
