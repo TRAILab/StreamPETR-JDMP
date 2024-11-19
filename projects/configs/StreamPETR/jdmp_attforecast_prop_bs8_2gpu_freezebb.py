@@ -16,6 +16,7 @@ log_config = dict(
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
 plugin_dir='projects/mmdet3d_plugin/'
+dist_params = dict(backend='nccl', timeout=90*60) # increase timeout from 30 to 60 mins for extra eval
 
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly

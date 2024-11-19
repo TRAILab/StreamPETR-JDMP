@@ -10,7 +10,7 @@ log_config = dict(
             init_kwargs=dict(
                 entity='trailab',
                 project='JDMP',
-                name='jdmpvov_cvforecast_bs8_2gpu'),
+                name='jdmp_attforecast_noprop_bs4_2gpu_freezedet_lre4_20e',),
             interval=50)
     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
@@ -18,13 +18,12 @@ plugin=True
 plugin_dir='projects/mmdet3d_plugin/'
 dist_params = dict(backend='nccl', timeout=90*60) # increase timeout from 30 to 60 mins for extra eval
 
-
 # If point cloud range is changed, the models should also change their point
 # cloud range accordingly
 point_cloud_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
 voxel_size = [0.2, 0.2, 8]
 img_norm_cfg = dict(
-    mean=[103.530, 116.280, 123.675], std=[57.375, 57.120, 58.395], to_rgb=False) # fix img_norm
+    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 # For nuScenes we usually do 10-class detection
 class_names = [
     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
@@ -32,9 +31,9 @@ class_names = [
 ]
 
 num_gpus = 2
-batch_size = 8
+batch_size = 4
 num_iters_per_epoch = 28130 // (num_gpus * batch_size)
-num_epochs = 24
+num_epochs = 20
 
 queue_length = 1
 num_frame_losses = 1
@@ -51,16 +50,23 @@ model = dict(
     num_frame_backbone_grads=num_frame_losses,
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
+    freeze_layer='det_head', # None, 'backbone', 'neck', 'roi_head', 'det_head' supported
     img_backbone=dict(
-        type='VoVNetCP', ###use checkpoint to save memory
-        spec_name='V-99-eSE',
-        norm_eval=True,
+        init_cfg=dict(
+            type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
+            prefix='backbone.'),       
+        type='ResNet',
+        depth=50,
+        num_stages=4,
+        out_indices=(2, 3),
         frozen_stages=-1,
-        input_ch=3,
-        out_features=('stage4','stage5',)),
+        norm_cfg=dict(type='BN2d', requires_grad=False),
+        norm_eval=True,
+        with_cp=True,
+        style='pytorch'),
     img_neck=dict(
         type='CPFPN',  ###remove unused parameters 
-        in_channels=[768, 1024],
+        in_channels=[1024, 2048],
         out_channels=256,
         num_outs=2),
     img_roi_head=dict(
@@ -71,11 +77,11 @@ model = dict(
             type='QualityFocalLoss',
             use_sigmoid=True,
             beta=2.0,
-            loss_weight=2.0),
-        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=1.0),
-        loss_bbox2d=dict(type='L1Loss', loss_weight=5.0),
-        loss_iou2d=dict(type='GIoULoss', loss_weight=2.0),
-        loss_centers2d=dict(type='L1Loss', loss_weight=10.0),
+            loss_weight=0.0),
+        loss_centerness=dict(type='GaussianFocalLoss', reduction='mean', loss_weight=0.0),
+        loss_bbox2d=dict(type='L1Loss', loss_weight=0.0),
+        loss_iou2d=dict(type='GIoULoss', loss_weight=0.0),
+        loss_centers2d=dict(type='L1Loss', loss_weight=0.0),
         train_cfg=dict(
         assigner2d=dict(
             type='HungarianAssigner2D',
@@ -101,9 +107,9 @@ model = dict(
         LID=True,
         forecast_emb_sep=False,
         forecast_mem_update=False,
-        with_attn_forecast=False,
-        with_velo_forecast=True,
         with_position=True,
+        with_attn_forecast=True,
+        with_velo_forecast=False,
         position_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
         code_weights = [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
         detect_transformer=dict(
@@ -133,26 +139,13 @@ model = dict(
                                      'ffn', 'norm')),
             )),
         forecast_transformer=dict(
-            type='JDMPTemporalTransformer',
-            decoder=dict(
-                type='PETRTransformerDecoder',
-                return_intermediate=True,
-                num_layers=6,
-                transformerlayers=dict(
-                    type='PETRTemporalDecoderLayer',
-                    attn_cfgs=[
-                        dict(
-                            type='MultiheadAttention',
-                            embed_dims=256,
-                            num_heads=8,
-                            dropout=0.1),
-                        ],
-                    feedforward_channels=2048,
-                    ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
-                    operation_order=('self_attn', 'norm',
-                                     'ffn', 'norm')),
-            )),
+            type='JDMPForecastTransformer',
+            embed_dims=256, 
+            num_propagated=128, 
+            num_reg_fcs=2, 
+            num_forecast_layers=3,
+            pc_range=point_cloud_range,
+        ),
         bbox_coder=dict(
             type='NMSFreeCoder',
             post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
@@ -165,9 +158,10 @@ model = dict(
             use_sigmoid=True,
             gamma=2.0,
             alpha=0.25,
-            loss_weight=2.0),
-        loss_bbox=dict(type='L1Loss', loss_weight=0.25),
-        loss_forecast=dict(type='L1Loss', loss_weight=0.0),
+            loss_weight=0.0),
+        loss_bbox=dict(type='L1Loss', loss_weight=0.0),
+        loss_forecast=dict(type='L1Loss', loss_weight=0.5),
+        loss_forecast_cls=dict(type='CrossEntropyLoss', use_sigmoid=True, loss_weight=0.5),
         loss_iou=dict(type='GIoULoss', loss_weight=0.0),),
     # model training and testing settings
     train_cfg=dict(pts=dict(
@@ -190,8 +184,8 @@ file_client_args = dict(backend='disk')
 
 
 ida_aug_conf = {
-        "resize_lim": (0.47, 0.625),
-        "final_dim": (320, 800),
+        "resize_lim": (0.38, 0.55),
+        "final_dim": (256, 704),
         "bot_pct_lim": (0.0, 0.0),
         "rot_lim": (0.0, 0.0),
         "H": 900,
@@ -216,7 +210,7 @@ train_pipeline = [
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='JDMPFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists', 'gt_forecasting_bboxes_3d', 'gt_forecasting_masks'] + collect_keys,
-             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d', 'sample_idx'))
+             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d', 'gt_labels_3d', 'sample_idx'))
 ]
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -264,10 +258,9 @@ data = dict(
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
 
-
 optimizer = dict(
     type='AdamW', 
-    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=2e-4, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
             'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
@@ -284,10 +277,10 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=num_iters_per_epoch, pipeline=test_pipeline)
+evaluation = dict(interval=2*num_iters_per_epoch, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=1)
+checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
 runner = dict(
     type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
-load_from='ckpts/fcos3d_vovnet_imgbackbone-remapped.pth'
+load_from='ckpts/jdmp_pretrain_baseline.pth'
 resume_from=None
