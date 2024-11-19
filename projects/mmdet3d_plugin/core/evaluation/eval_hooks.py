@@ -10,6 +10,7 @@ import mmcv
 import torch.distributed as dist
 from mmcv.runner import DistEvalHook as BaseDistEvalHook
 from mmcv.runner import EvalHook as BaseEvalHook
+import torch.distributed
 from torch.nn.modules.batchnorm import _BatchNorm
 from mmdet.core.evaluation.eval_hooks import DistEvalHook
 
@@ -74,6 +75,7 @@ class CustomDistEvalHook(BaseDistEvalHook):
             tmpdir = osp.join(runner.work_dir, '.eval_hook')
 
         from projects.mmdet3d_plugin.core.apis.test import custom_multi_gpu_test # to solve circlur  import
+        import torch
 
         results = custom_multi_gpu_test(
             runner.model,
@@ -88,4 +90,5 @@ class CustomDistEvalHook(BaseDistEvalHook):
 
             if self.save_best:
                 self._save_ckpt(runner, key_score)
+        torch.distributed.barrier() # workaround for single gpu eval
   

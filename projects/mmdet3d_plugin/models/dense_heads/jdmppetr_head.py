@@ -1542,11 +1542,24 @@ class JDMPPETRHead(AnchorFreeHead):
             gt_forecasting_masks for _ in range(num_dec_layers)
         ]
 
-        losses_cls, losses_bbox, losses_forecast_cls, losses_forecast = multi_apply(
-            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_scores, all_forecast_preds,
+        # TODO: fix workaround for calling loss_single twice due to different number of detect and forecast decoder layers
+        assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
+        all_forecast_preds_repeat = all_forecast_preds.repeat(2,1,1,1,1,1)
+        all_forecast_scores_repeat = all_forecast_scores.repeat(2,1,1,1,1)
+        losses_cls, losses_bbox, _, _ = multi_apply(
+            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_scores_repeat, all_forecast_preds_repeat,
             all_gt_bboxes_list, all_gt_labels_list,
             all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
             all_gt_bboxes_ignore_list)
+
+        n_layers = self.forecast_transformer.num_forecast_layers
+        all_bbox_preds_last = all_bbox_preds[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
+        all_cls_scores_last = all_cls_scores[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
+        _, _, losses_forecast_cls, losses_forecast = multi_apply(
+            self.loss_single, all_cls_scores_last, all_bbox_preds_last, all_forecast_scores, all_forecast_preds,
+            all_gt_bboxes_list[:n_layers], all_gt_labels_list[:n_layers],
+            all_gt_forecasting_bboxes_3d[:n_layers], all_gt_forecasting_masks[:n_layers],
+            all_gt_bboxes_ignore_list[:n_layers])
 
         loss_dict = dict()
 
@@ -1594,7 +1607,7 @@ class JDMPPETRHead(AnchorFreeHead):
         elif self.with_dn:
             dn_losses_cls, dn_losses_bbox, _, _ = multi_apply(
                 self.loss_single, all_cls_scores, all_bbox_preds,
-                all_forecast_scores, all_forecast_preds,
+                all_forecast_scores_repeat, all_forecast_preds_repeat,
                 all_gt_bboxes_list, all_gt_labels_list, 
                 all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
                 all_gt_bboxes_ignore_list)
@@ -1606,6 +1619,11 @@ class JDMPPETRHead(AnchorFreeHead):
                 loss_dict[f'd{num_dec_layer}.dn_loss_cls'] = loss_cls_i.detach()     
                 loss_dict[f'd{num_dec_layer}.dn_loss_bbox'] = loss_bbox_i.detach()     
                 num_dec_layer += 1
+        
+        # check loss dict has all keys
+        num_losses = 4*self.detect_transformer.decoder.num_layers+2*self.forecast_transformer.num_forecast_layers
+        assert len(list(loss_dict.keys())) == num_losses
+
         return loss_dict
 
 
