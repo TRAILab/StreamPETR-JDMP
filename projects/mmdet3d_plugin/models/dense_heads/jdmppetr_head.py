@@ -1179,9 +1179,12 @@ class JDMPPETRHead(AnchorFreeHead):
         
         if self.with_attn_forecast:
             # forecast assignment
-            rec_score = cls_score.sigmoid().topk(1, dim=-1).values
-            _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
-            topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
+            if self.forecast_all:
+                topk_bbox_pred = bbox_pred
+            else:
+                rec_score = cls_score.sigmoid().topk(1, dim=-1).values
+                _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
+                topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
             num_gts, num_bboxes = gt_bboxes.size(0), topk_bbox_pred.size(0)
             if num_gts == 0 or num_bboxes == 0:
                 matched_pred_inds = torch.tensor([], device=bbox_pred.device)
@@ -1221,6 +1224,43 @@ class JDMPPETRHead(AnchorFreeHead):
             forecast_targets = torch.zeros_like(bbox_targets)
             forecast_labels = torch.zeros_like(labels)
             forecast_label_weights = torch.zeros_like(label_weights)
+
+        if self.viz_forecast_loss and self.with_attn_forecast:
+            import matplotlib.pyplot as plt
+            from datetime import datetime
+            import os
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M')
+            filename = f'output/viz/forecast_debug/{timestamp}_assign.png'
+            if not os.path.exists(filename):
+                plt_preds = topk_bbox_pred[:, :2].detach().cpu().numpy()
+                plt_gts = gt_bboxes[:, :2].detach().cpu().numpy()
+                matched_preds = topk_bbox_pred[matched_pred_inds, :2].detach().cpu().numpy()
+                matched_gts = gt_bboxes[matched_gt_inds, :2].detach().cpu().numpy()
+                plt.figure(figsize=(10, 10))
+                plt.scatter(plt_preds[:, 0], plt_preds[:, 1], c='blue', label='Predictions', alpha=0.6)
+                plt.scatter(plt_gts[:, 0], plt_gts[:, 1], c='red', label='Ground Truths', alpha=0.6)
+                for pred, gt in zip(matched_preds, matched_gts):
+                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], color='green', alpha=0.8, marker='*')
+                plt.legend()
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                plt.close()
+            filename = f'output/viz/forecast_debug/{timestamp}_forecast.png'
+            if not os.path.exists(filename):
+                plt_preds = forecast_pred[matched_pred_inds] + topk_bbox_pred[matched_pred_inds, :2].unsqueeze(1).unsqueeze(1)
+                plt_preds = plt_preds.reshape(-1,12,2).detach().cpu().numpy()
+                plt_gts = gt_forecasting_bboxes_3d[matched_gt_inds,:,:2].detach().cpu().numpy()
+                matched_preds = topk_bbox_pred[matched_pred_inds, :2].detach().cpu().numpy()
+                matched_gts = gt_bboxes[matched_gt_inds, :2].detach().cpu().numpy()
+                plt.figure(figsize=(10, 10))
+                for i in range(len(plt_preds)):
+                    plt.plot(plt_preds[i, :, 0], plt_preds[i, :, 1], c='blue', alpha=0.6, marker='o')
+                for i in range(len(plt_gts)):
+                    plt.plot(plt_gts[i, :, 0], plt_gts[i, :, 1], c='red', alpha=0.6, marker='o')
+                for pred, gt in zip(matched_preds, matched_gts):
+                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], color='green', alpha=0.8, marker='*')
+                plt.savefig(filename, dpi=300, bbox_inches='tight')
+                plt.close()
+
         return (labels, label_weights, bbox_targets, bbox_weights, 
                 forecast_labels, forecast_label_weights, 
                 forecast_targets, forecast_weights, 
@@ -1397,7 +1437,7 @@ class JDMPPETRHead(AnchorFreeHead):
             from datetime import datetime
             import os
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
-            filename = f'output/viz/forecast_debug/forecast_loss_single_{timestamp}.png'
+            filename = f'output/viz/forecast_debug/{timestamp}_loss.png'
             if not os.path.exists(filename):
                 pred_pos = forecast_preds[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
                 gt_pos = forecast_targets[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
@@ -1544,14 +1584,6 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # TODO: fix workaround for calling loss_single twice due to different number of detect and forecast decoder layers
         assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
-        all_forecast_preds_repeat = all_forecast_preds.repeat(2,1,1,1,1,1)
-        all_forecast_scores_repeat = all_forecast_scores.repeat(2,1,1,1,1)
-        losses_cls, losses_bbox, _, _ = multi_apply(
-            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_scores_repeat, all_forecast_preds_repeat,
-            all_gt_bboxes_list, all_gt_labels_list,
-            all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
-            all_gt_bboxes_ignore_list)
-
         n_layers = self.forecast_transformer.num_forecast_layers
         all_bbox_preds_last = all_bbox_preds[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
         all_cls_scores_last = all_cls_scores[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
@@ -1560,6 +1592,14 @@ class JDMPPETRHead(AnchorFreeHead):
             all_gt_bboxes_list[:n_layers], all_gt_labels_list[:n_layers],
             all_gt_forecasting_bboxes_3d[:n_layers], all_gt_forecasting_masks[:n_layers],
             all_gt_bboxes_ignore_list[:n_layers])
+        
+        all_forecast_preds_repeat = all_forecast_preds.repeat(2,1,1,1,1,1)
+        all_forecast_scores_repeat = all_forecast_scores.repeat(2,1,1,1,1)
+        losses_cls, losses_bbox, _, _ = multi_apply(
+            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_scores_repeat, all_forecast_preds_repeat,
+            all_gt_bboxes_list, all_gt_labels_list,
+            all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
+            all_gt_bboxes_ignore_list)
 
         loss_dict = dict()
 
