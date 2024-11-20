@@ -511,7 +511,7 @@ class JDMPPetr3D(MVXTwoStageDetector):
                 losses2d = self.img_roi_head.loss(*loss2d_inputs)
                 losses.update(losses2d) 
                 num_losses = 5+4*self.detect_transformer.decoder.num_layers+2*self.forecast_transformer.num_forecast_layers
-                assert len(list(losses.keys())) == num_losses
+                assert len(losses) == num_losses, f"Expected {num_losses} losses, but got {len(loss_dict)}. Keys: {list(loss_dict.keys())}"
 
             return losses
         else:
