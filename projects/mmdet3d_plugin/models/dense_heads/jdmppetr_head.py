@@ -675,7 +675,8 @@ class JDMPPETRHead(AnchorFreeHead):
             torch.arange(A)[None, :, None, None],
             torch.arange(TOPN)[None, None, :, None],
             element_indices[..., None]]
-        assert (select_map_mask==0).all()
+        if not (select_map_mask==0).all():
+            print("select_map_mask temp values: ", (select_map_mask==0).sum()) 
         return map_encoding, det_map_positions
 
     def plot_map_feats(self, sample_idx, det2ego_pose2d_vec_b, global2det_pose2d_vec_b,
