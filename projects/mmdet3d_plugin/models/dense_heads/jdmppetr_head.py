@@ -508,8 +508,6 @@ class JDMPPETRHead(AnchorFreeHead):
         B = query_pos.size(0)
 
         prop_mem_ref_point = self.memory_reference_point.clone()
-        if self.with_velo_forecast:
-            prop_mem_ref_point[:, self.num_propagated:] = self.memory_reference_point[:, self.num_propagated:] + torch.nn.functional.pad(self.memory_velo[:, self.num_propagated:], (0,1)) * self.memory_timestamp[:, self.num_propagated:].float()
         temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point))
         if self.with_attn_forecast and self.forecast_mem_update:
