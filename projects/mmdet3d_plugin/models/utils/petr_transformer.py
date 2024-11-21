@@ -885,13 +885,14 @@ class JDMPTemporalTransformer(BaseModule):
 
 @TRANSFORMER.register_module()
 class JDMPForecastTransformer(BaseModule):
-    def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, init_cfg=None):
+    def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, init_cfg=None, with_map_encoder=False):
         super(JDMPForecastTransformer, self).__init__(init_cfg=init_cfg)
         self.embed_dims = embed_dims
         self.num_propagated = num_propagated
         self.num_reg_fcs = num_reg_fcs
         self.num_forecast_layers = num_forecast_layers
         self.pc_range = nn.Parameter(torch.tensor(pc_range), requires_grad=False)
+        self.with_map_encoder = with_map_encoder
 
         anchor_infos = pickle.load(open('ckpts/motion_anchor_infos_mode6.pkl', 'rb'))
         self.kmeans_anchors = torch.stack(
@@ -929,6 +930,12 @@ class JDMPForecastTransformer(BaseModule):
             nn.ReLU(),
             nn.Linear(self.embed_dims, self.embed_dims),
         )
+        if self.with_map_encoder:
+            self.forecast_map_query_embedding = nn.Sequential(
+                nn.Linear(self.embed_dims*2, self.embed_dims),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims, self.embed_dims),
+            )
         self.forecast_agent_level_embedding = nn.Sequential(
             nn.Linear(self.embed_dims*2, self.embed_dims),
             nn.ReLU(),
@@ -964,11 +971,18 @@ class JDMPForecastTransformer(BaseModule):
             nn.ReLU(),
             nn.Linear(self.embed_dims*2, self.embed_dims),
         )
-        self.out_query_fuser = nn.Sequential(
-            nn.Linear(self.embed_dims*2, self.embed_dims*2),
-            nn.ReLU(),
-            nn.Linear(self.embed_dims*2, self.embed_dims),
-        )
+        if self.with_map_encoder:
+            self.out_query_fuser = nn.Sequential(
+                nn.Linear(self.embed_dims*3, self.embed_dims*2),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims*2, self.embed_dims),
+            )
+        else:
+            self.out_query_fuser = nn.Sequential(
+                nn.Linear(self.embed_dims*2, self.embed_dims*2),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims*2, self.embed_dims),
+            )
         self.detection_agent_interaction_layers = nn.ModuleList(
             [nn.TransformerDecoderLayer(d_model=256,
                                         nhead=8,
@@ -976,6 +990,14 @@ class JDMPForecastTransformer(BaseModule):
                                         dim_feedforward=256*2,
                                         batch_first=True) 
             for i in range(self.num_forecast_layers)])
+        if self.with_map_encoder:
+            self.map_interaction_layers = nn.ModuleList(
+                [nn.TransformerDecoderLayer(d_model=256,
+                                            nhead=8,
+                                            dropout=0.1,
+                                            dim_feedforward=256*2,
+                                            batch_first=True) 
+                for i in range(self.num_forecast_layers)])
         
         self.unflatten_traj = nn.Unflatten(3, (12, 2))
         self.log_softmax = nn.LogSoftmax(dim=2)
@@ -987,11 +1009,16 @@ class JDMPForecastTransformer(BaseModule):
         #         xavier_init(m, distribution='uniform')
         self._is_init = True
 
-    def forward(self, detection_query, detection_reference_pose):
+    def forward(self, detection_query, detection_reference_pose, map_query=None, map_reference_pos=None):
         B = detection_query.size(0)
         A = self.num_propagated
         M = self.num_forecast_modes
         T = 12
+
+        # Map query
+        if self.with_map_encoder:
+            map_reference_point_norm = self.norm_points_2d(map_reference_pos) # B, A, H, 2
+            map_query_pos = self.forecast_map_query_embedding(pos2posemb2d(map_reference_point_norm))  # B, A, H, C
         
         # Detection query
         detection_reference_point = detection_reference_pose[..., :2]
@@ -1045,7 +1072,15 @@ class JDMPForecastTransformer(BaseModule):
             k_dai = (detection_query + detection_query_pos).reshape(B*A, -1).unsqueeze(1).expand(B*A, M, -1) # B, A, C -> B*A, M, C
             detection_query_embed = self.detection_agent_interaction_layers[lid](q_dai, k_dai).view(B, A, M, -1)
             
-            query_embed = [detection_query_embed, detection_query_bc+detection_query_pos_bc]
+            if self.with_map_encoder:
+                q_mai = query_embed + detection_query_pos_bc
+                q_mai = torch.flatten(q_mai, start_dim=0, end_dim=1) # B*A, M, C
+                k_mai = (map_query + map_query_pos).reshape(B*A, M, -1) # B, A, H, C -> B*A, H, C
+                map_query_embed = self.map_interaction_layers[lid](q_mai, k_mai).view(B, A, M, -1)
+                
+                query_embed = [detection_query_embed, map_query_embed, detection_query_bc+detection_query_pos_bc]
+            else:
+                query_embed = [detection_query_embed, detection_query_bc+detection_query_pos_bc]
             query_embed = torch.cat(query_embed, dim=-1)
             query_embed = self.out_query_fuser(query_embed)
 

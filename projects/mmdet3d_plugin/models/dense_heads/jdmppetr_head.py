@@ -342,10 +342,10 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # Map encoder
         if self.with_map_encoder:
-            self.map_topk_nodes = 32
+            self.map_topk_nodes = 18
             self.map_feat_size = 6
-            self.map_emb_size = 16
-            self.map_enc_size = 32
+            self.map_emb_size = 128
+            self.map_enc_size = 256
             self.map_node_emb = nn.Linear(self.map_feat_size, self.map_emb_size)
             self.map_node_encoder = nn.GRU(self.map_emb_size, self.map_enc_size, batch_first=True)
             self.map_leaky_relu = nn.LeakyReLU()
@@ -593,17 +593,17 @@ class JDMPPETRHead(AnchorFreeHead):
             
     #     return forecast_tgt, forecast_pos, forecast_reference_point, temp_memory, temp_pos
 
-    def map_encoding(self, sample_idx, global2ego_3dpose_matrix):
+    def map_encoding(self, sample_idx, global2ego_3dpose_matrix, global2det_2dposition, global2det_yaw):
         # Params for map encoding TODO: move to config
         TOPN = self.map_topk_nodes
         F = self.map_feat_size
         debug = False
-        B, A, N, E = global2ego_3dpose_matrix.size(0), self.num_propagated, self.pgp.max_nodes, self.pgp.polyline_length
+        B, A, N, E = global2ego_3dpose_matrix.size(0), global2det_2dposition.size(1), self.pgp.max_nodes, self.pgp.polyline_length
         device = global2ego_3dpose_matrix.device
 
         # Extract detection and ego poses
-        global2det_2dposition = self.memory_reference_point[:, :self.num_propagated, :2]
-        global2det_yaw = self.memory_rotation[:, :self.num_propagated]
+        # global2det_2dposition = self.memory_reference_point[:, :self.num_propagated, :2]
+        # global2det_yaw = self.memory_rotation[:, :self.num_propagated]
         global2det_yaw = global2det_yaw + torch.tensor(math.pi)/2
         global2det_pose2d_vec = torch.cat([global2det_2dposition, global2det_yaw], dim=-1)
         det2global_pose2d_mat =  self.pose2d_vec_to_matinv(global2det_pose2d_vec)
@@ -659,7 +659,22 @@ class JDMPPETRHead(AnchorFreeHead):
                                     det_map_feats[b], det_map_masks[b], ego_map_feats[b], ego_map_masks[b])
         map_embedding = self.map_leaky_relu(self.map_node_emb(det_map_feats))
         map_encoding = self.map_variable_size_gru_encode(map_embedding, det_map_masks, self.map_node_encoder)
-        return map_encoding
+        element_indices = (det_map_masks[...,0]<0.5).sum(dim=-1)//2
+        det_map_positions = det_map_feats[...,:2]
+        det_map_positions = det_map_positions[
+            torch.arange(B)[:, None, None, None],
+            torch.arange(A)[None, :, None, None],
+            torch.arange(TOPN)[None, None, :, None],
+            element_indices[..., None],
+            :].squeeze()
+        select_map_mask = det_map_masks[...,0]
+        select_map_mask = select_map_mask[
+            torch.arange(B)[:, None, None, None],
+            torch.arange(A)[None, :, None, None],
+            torch.arange(TOPN)[None, None, :, None],
+            element_indices[..., None]]
+        assert (select_map_mask==0).all()
+        return map_encoding, det_map_positions
 
     def plot_map_feats(self, sample_idx, det2ego_pose2d_vec_b, global2det_pose2d_vec_b,
                        det_lane_node_feats_b, det_lane_node_masks_b, ego_lane_node_feats_b, ego_lane_node_masks_b):
@@ -984,7 +999,14 @@ class JDMPPETRHead(AnchorFreeHead):
                 detection_reference_point = memory_reference_point[:, :self.num_propagated]
                 detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
             detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
-            all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose)
+            if self.with_map_encoder:
+                detection_reference_point_global = transform_reference_points(detection_reference_point, data['ego_pose'], reverse=False)
+                detection_reference_rotation_global = transform_rotations(detection_reference_rotation, data['ego_pose'])
+                sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+                map_query, map_reference_pos = self.map_encoding(sample_idx, data['ego_pose'], detection_reference_point_global, detection_reference_rotation_global)
+                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, map_query, map_reference_pos)
+            else:
+                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose)
             # Prepare for forecasting
             # forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
             #     forecast_temp_pos = self.forecast_alignment(data)
@@ -992,9 +1014,6 @@ class JDMPPETRHead(AnchorFreeHead):
             # identity = torch.eye(self.num_propagated*self.num_forecast_modes, dtype=torch.uint8, device=forecast_tgt.device)
             # forecast_attn_mask = torch.kron(identity,attn_mask_block).to(forecast_tgt.device) == 0
             # # forecast_attn_mask = None
-            # if self.with_map_encoder:
-            #     sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
-            #     map_encoding = self.map_encoding(sample_idx, data['ego_pose'])
 
             # # Forecasting
             # outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask)
