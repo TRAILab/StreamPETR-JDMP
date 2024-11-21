@@ -181,7 +181,12 @@ def main():
         distributed = False
     else:
         distributed = True
+        if 'timeout' in cfg.dist_params: # timeout workaround: timedelta object from config value 
+            from datetime import timedelta
+            cfg.dist_params.timeout = timedelta(seconds=cfg.dist_params.timeout)
         init_dist(args.launcher, **cfg.dist_params)
+        if 'timeout' in cfg.dist_params: # timeout workaround: reset config value
+            cfg.dist_params.timeout = cfg.dist_params.timeout.seconds
 
     # set random seeds
     if args.seed is not None:
