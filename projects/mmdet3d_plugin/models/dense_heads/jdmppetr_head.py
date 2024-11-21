@@ -660,6 +660,7 @@ class JDMPPETRHead(AnchorFreeHead):
         map_embedding = self.map_leaky_relu(self.map_node_emb(det_map_feats))
         map_encoding = self.map_variable_size_gru_encode(map_embedding, det_map_masks, self.map_node_encoder)
         element_indices = (det_map_masks[...,0]<0.5).sum(dim=-1)//2
+        breakpoint()
         det_map_positions = det_map_feats[...,:2]
         det_map_positions = det_map_positions[
             torch.arange(B)[:, None, None, None],
