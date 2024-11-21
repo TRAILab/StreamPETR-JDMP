@@ -294,12 +294,21 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict[str, float]: Results of each evaluation metric.
         """
+        # bbox_memory_usage_gb = 1e-9*len(results['bbox_results'])*(
+        #     results['bbox_results'][0]['pts_bbox']['labels_3d'].element_size()*results['bbox_results'][0]['pts_bbox']['labels_3d'].numel() +
+        #     results['bbox_results'][0]['pts_bbox']['boxes_3d'].tensor.element_size()*results['bbox_results'][0]['pts_bbox']['boxes_3d'].tensor.numel() +
+        #     results['bbox_results'][0]['pts_bbox']['scores_3d'].element_size()*results['bbox_results'][0]['pts_bbox']['scores_3d'].numel())
+        # forecast_memory_usage_gb = 1e-9*len(results['forecast_results'])*(
+        #     results['forecast_results'][0]['pts_forecast']['trajs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['trajs_2d'].numel() +
+        #     results['forecast_results'][0]['pts_forecast']['refs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['refs_2d'].numel() +
+        #     results['forecast_results'][0]['pts_forecast']['scores_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['scores_2d'].numel())
         results_dict = dict()
         if 'forecast_results' in results:
             forecast_results = results['forecast_results']
             results = results['bbox_results']
             preds, gts = self.forecast_format(forecast_results, jsonfile_prefix)
-            results_dict.update(self.forecast_evaluate(forecast_results, preds, gts, jsonfile_prefix))
+            num_forecasts = len(forecast_results[0]['pts_forecast']['trajs_2d'])
+            results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
 
         if 'bbox' in metric:
             results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
@@ -355,17 +364,18 @@ class CustomNuScenesDataset(NuScenesDataset):
             gt_cur_positions = gt[:,0]
             gt_pred_positions = gt[:,1:]
             # Get forecast positions
-            if forecast.dim() == 4:
-                forecast_pred_positions = forecast[..., :2].detach().cpu().numpy()
-                forecast_probs = forecast[..., 0, 2].detach().cpu().numpy()
-                forecast_cur_positions = forecast[:, 0, 0, 3:5].detach().cpu().numpy()
-                forecast_pred_positions = forecast_pred_positions + forecast_cur_positions[:, None, None, :]
-            else:
-                raise ValueError('Forecast dim should be 4')
+            forecast_pred_positions = forecast['pts_forecast']['trajs_2d'].numpy()
+            forecast_probs = forecast['pts_forecast']['scores_2d'].numpy()
+            forecast_cur_positions = forecast['pts_forecast']['refs_2d'].numpy()
+            forecast_pred_positions = forecast_pred_positions + forecast_cur_positions[:, None, None, :]
 
+            # Get all predictions 
             if export_full_preds:
-                forecast_pred_positions_full = np.concatenate((forecast_cur_positions[:, None, None, :], forecast_pred_positions),axis=2)
-                pred_ids = np.arange(len(forecast))
+                num_modes = forecast_pred_positions.shape[1]
+                forecast_pred_positions_full = np.concatenate(
+                    (np.repeat(forecast_cur_positions[:, None, None, :], num_modes, 1), 
+                    forecast_pred_positions), axis=2)
+                pred_ids = np.arange(len(forecast_pred_positions))
                 for pred_id in pred_ids:
                     instance_token = '0' # Not needed
                     sample_token = self.data_infos[sample_id]['token']
@@ -379,9 +389,9 @@ class CustomNuScenesDataset(NuScenesDataset):
             min_gt_idx, min_dist = np.argmin(dist, axis=0), np.min(dist, axis=0)
             match_true = min_dist < match_threshold
             gt_ids = min_gt_idx[match_true]
-            pred_ids = np.arange(len(forecast))[match_true]
+            pred_ids = np.arange(len(forecast_pred_positions))[match_true]
 
-            # Get matched gt and predictions and apply gt masks
+            # Get matched gt and predictions
             for pred_id, gt_id in zip(pred_ids, gt_ids):
                 gt_pred_mask = self.data_infos[sample_id]['gt_forecasting_masks'][gt_id][1:]
                 if gt_pred_mask.sum() == 0:
@@ -408,7 +418,7 @@ class CustomNuScenesDataset(NuScenesDataset):
 
         return preds, gts
 
-    def forecast_evaluate(self, forecast_results, preds, gts, jsonfile_prefix=None):
+    def forecast_evaluate(self, preds, gts, jsonfile_prefix=None, num_forecasts=300):
         """Evaluation for a single forecast model in nuScenes protocol.
 
         Args:
@@ -453,7 +463,6 @@ class CustomNuScenesDataset(NuScenesDataset):
                 else:
                     metric_name = 'forecast/'+forecast_metric.name
                     results[metric_name] = agg(containers[forecast_metric.name])[0]
-        num_forecasts = forecast_results[0].shape[0]
         num_matches_avg = n_preds / len(self.data_infos)
         results['forecast/AvgMatchRate_2'] = num_matches_avg / num_forecasts
         for result in results:

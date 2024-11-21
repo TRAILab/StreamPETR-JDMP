@@ -302,8 +302,8 @@ class JDMPPETRHead(AnchorFreeHead):
         self.reference_points = nn.Embedding(self.num_query, 3)
         if self.num_propagated > 0:
             self.pseudo_reference_points = nn.Embedding(self.num_propagated, 3)
-        self.num_forecast_modes = 1
-        self.num_forecast_times = 13
+        # self.num_forecast_modes = 1
+        # self.num_forecast_times = 13
 
         self.query_embedding = nn.Sequential(
             nn.Linear(self.embed_dims*3//2, self.embed_dims),
@@ -1237,27 +1237,32 @@ class JDMPPETRHead(AnchorFreeHead):
                 matched_preds = topk_bbox_pred[matched_pred_inds, :2].detach().cpu().numpy()
                 matched_gts = gt_bboxes[matched_gt_inds, :2].detach().cpu().numpy()
                 plt.figure(figsize=(10, 10))
-                plt.scatter(plt_preds[:, 0], plt_preds[:, 1], c='blue', label='Predictions', alpha=0.6)
-                plt.scatter(plt_gts[:, 0], plt_gts[:, 1], c='red', label='Ground Truths', alpha=0.6)
+                plt.scatter(plt_preds[:, 0], plt_preds[:, 1], s=5, c='blue', label='Predictions', alpha=0.6)
+                plt.scatter(plt_gts[:, 0], plt_gts[:, 1], s=5, c='red', label='Ground Truths', alpha=0.6)
                 for pred, gt in zip(matched_preds, matched_gts):
-                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], color='green', alpha=0.8, marker='*')
+                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], c='green', alpha=0.8, marker='*', markersize=1, linewidth=1)
                 plt.legend()
                 plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close()
             filename = f'output/viz/forecast_debug/{timestamp}_forecast.png'
             if not os.path.exists(filename):
                 plt_preds = forecast_pred[matched_pred_inds] + topk_bbox_pred[matched_pred_inds, :2].unsqueeze(1).unsqueeze(1)
+                if self.forecast_transformer.num_forecast_modes > 6:
+                    plt_scores = forecast_score[matched_pred_inds]
+                    topk_indices = torch.topk(plt_scores, 6, dim=1).indices  # Shape: (100, 6)
+                    expanded_indices = topk_indices.unsqueeze(-1).expand(-1, -1, 12, 2)  # Shape: (100, 6, 12, 2)
+                    plt_preds = torch.gather(plt_preds, 1, expanded_indices)  # Shape: (100, 6, 12, 2)
                 plt_preds = plt_preds.reshape(-1,12,2).detach().cpu().numpy()
                 plt_gts = gt_forecasting_bboxes_3d[matched_gt_inds,:,:2].detach().cpu().numpy()
                 matched_preds = topk_bbox_pred[matched_pred_inds, :2].detach().cpu().numpy()
                 matched_gts = gt_bboxes[matched_gt_inds, :2].detach().cpu().numpy()
                 plt.figure(figsize=(10, 10))
                 for i in range(len(plt_preds)):
-                    plt.plot(plt_preds[i, :, 0], plt_preds[i, :, 1], c='blue', alpha=0.6, marker='o')
+                    plt.plot(plt_preds[i, :, 0], plt_preds[i, :, 1], c='blue', alpha=0.6, marker='o', markersize=5)
                 for i in range(len(plt_gts)):
-                    plt.plot(plt_gts[i, :, 0], plt_gts[i, :, 1], c='red', alpha=0.6, marker='o')
+                    plt.plot(plt_gts[i, :, 0], plt_gts[i, :, 1], c='red', alpha=0.6, marker='o', markersize=5)
                 for pred, gt in zip(matched_preds, matched_gts):
-                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], color='green', alpha=0.8, marker='*')
+                    plt.plot([pred[0], gt[0]], [pred[1], gt[1]], c='green', alpha=0.8, marker='*', markersize=5)
                 plt.savefig(filename, dpi=300, bbox_inches='tight')
                 plt.close()
 
@@ -1449,8 +1454,8 @@ class JDMPPETRHead(AnchorFreeHead):
                             continue
                         pred_pos_i = pred_pos[i,j][flags[i,j][:, 0] == 1.0]
                         gt_pos_i = gt_pos[i,j][flags[i,j][:, 0] == 1.0]
-                        plt.plot(pred_pos_i[:,0], pred_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:blue', label=labels[0])
-                        plt.plot(gt_pos_i[:,0], gt_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:orange', label=labels[1])
+                        plt.plot(pred_pos_i[:,0], pred_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:blue', label=labels[0], markersize=5)
+                        plt.plot(gt_pos_i[:,0], gt_pos_i[:,1], marker='o', linestyle='-', alpha=0.7, color='tab:orange', label=labels[1], markersize=5)
                         plt.plot([pred_pos_i[-1,0], gt_pos_i[-1,0]], [pred_pos_i[-1,1], gt_pos_i[-1,1]], marker='x', linestyle='--', alpha=0.7, color='tab:grey')
                         labels = [None, None]
                 plt.legend()
@@ -1700,14 +1705,46 @@ class JDMPPETRHead(AnchorFreeHead):
         Returns:
             torch.tensor: Forecasting results (preds, scores, reference_points).
         """
-        forecast_preds = preds_dicts['all_forecast_preds'][-1] if 'all_forecast_preds' in preds_dicts else None
-        if forecast_preds.shape[-1] == 3:
-            forecast_preds = forecast_preds[..., :2]
-        forecast_scores = preds_dicts['all_forecast_scores'][-1] if 'all_forecast_scores' in preds_dicts else None
-        forecast_scores = forecast_scores.unsqueeze(-1).expand(-1, -1, -1, forecast_preds.size(-2), -1)
-        forecast_reference_points = preds_dicts['all_forecast_reference_points'] if 'all_forecast_reference_points' in preds_dicts else None
-        if forecast_reference_points.shape[-1] == 3:
-            forecast_reference_points = forecast_reference_points[..., :2]
-        forecast_reference_points = forecast_reference_points.unsqueeze(-2).unsqueeze(-2).expand(-1, -1, forecast_preds.size(-3), forecast_preds.size(-2), -1)
-        ret = torch.cat([forecast_preds, forecast_scores, forecast_reference_points], dim=-1)
-        return ret
+        if 'all_forecast_preds' not in preds_dicts:
+            return None 
+        all_forecast_preds = preds_dicts['all_forecast_preds'][-1].cpu()
+        all_forecast_reference_points = preds_dicts['all_forecast_reference_points'].cpu()
+        all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu()
+        if all_forecast_preds.shape[-1] == 3:
+            all_forecast_preds = all_forecast_preds[..., :2]
+        if all_forecast_reference_points.shape[-1] == 3:
+            all_forecast_reference_points = all_forecast_reference_points[..., :2]
+
+        # Topk forecast mode scores to save memory
+        max_num_modes = 6
+        if self.forecast_transformer.num_forecast_modes > max_num_modes:
+            all_forecast_scores, top_indices = torch.topk(all_forecast_scores.squeeze(-1), k=max_num_modes, dim=2)
+            top_indices_expanded = top_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, all_forecast_preds.size(3), all_forecast_preds.size(4))
+            all_forecast_preds = torch.gather(all_forecast_preds, 2, top_indices_expanded)
+
+        # Topk detection scores to match bbox decoder
+        max_num_bbox = self.bbox_coder.max_num
+        all_cls_scores = preds_dicts['all_cls_scores'][-1]
+        batch_size = all_cls_scores.size()[0]
+        topk_forecast_preds = []
+        topk_forecast_scores = []
+        topk_reference_points = []
+        for i in range(batch_size):
+            _, indexs = all_cls_scores[i].sigmoid().view(-1).topk(max_num_bbox)
+            forecast_index = torch.div(indexs, self.bbox_coder.num_classes, rounding_mode='floor')
+            forecast_preds = all_forecast_preds[i][forecast_index]
+            forecast_scores = all_forecast_scores[i][forecast_index]
+            reference_points = all_forecast_reference_points[i][forecast_index]
+            topk_forecast_preds.append(forecast_preds)
+            topk_forecast_scores.append(forecast_scores)
+            topk_reference_points.append(reference_points)
+        assert self.bbox_coder.score_threshold is None, "Not supported yet"
+
+        ret_list = []
+        for i in range(batch_size):
+            ret_list.append({'pts_forecast': {
+                'trajs_2d': topk_forecast_preds[i],
+                'refs_2d': topk_reference_points[i],
+                'scores_2d': topk_forecast_scores[i],
+            }})
+        return ret_list
