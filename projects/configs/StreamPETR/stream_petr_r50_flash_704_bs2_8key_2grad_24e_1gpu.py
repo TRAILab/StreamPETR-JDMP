@@ -2,6 +2,17 @@ _base_ = [
     '../../../mmdetection3d/configs/_base_/datasets/nus-3d.py',
     '../../../mmdetection3d/configs/_base_/default_runtime.py'
 ]
+# log_config = dict(
+#     interval=50,
+#     hooks=[
+#         dict(type='TextLoggerHook'),
+#         # dict(type='WandbLoggerHook',
+#         #     init_kwargs=dict(
+#         #         entity='trailab',
+#         #         project='JDMP',
+#         #         name='stream_petr_r50_flash_704_bs2_8key_2grad_24e_1gpu.py',),
+#         #     interval=50)
+#     ])
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 plugin=True
 plugin_dir='projects/mmdet3d_plugin/'
@@ -18,13 +29,8 @@ class_names = [
     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
 ]
 
-num_gpus = 8
-batch_size = 2
-num_iters_per_epoch = 28130 // (num_gpus * batch_size)
-num_epochs = 60
-
-queue_length = 1
-num_frame_losses = 1
+queue_length = 8 # sliding window training, set seq_mode = False in dataset
+num_frame_losses = 2 # faster convergence
 collect_keys=['lidar2img', 'intrinsics', 'extrinsics','timestamp', 'img_timestamp', 'ego_pose', 'ego_pose_inv']
 input_modality = dict(
     use_lidar=False,
@@ -39,9 +45,7 @@ model = dict(
     num_frame_losses=num_frame_losses,
     use_grid_mask=True,
     img_backbone=dict(
-        init_cfg=dict(
-            type='Pretrained', checkpoint="ckpts/cascade_mask_rcnn_r50_fpn_coco-20e_20e_nuim_20201009_124951-40963960.pth",
-            prefix='backbone.'),       
+        pretrained='torchvision://resnet50',
         type='ResNet',
         depth=50,
         num_stages=4,
@@ -81,10 +85,10 @@ model = dict(
         type='StreamPETRHead',
         num_classes=10,
         in_channels=256,
-        num_query=300,
-        memory_len=512,
-        topk_proposals=128,
-        num_propagated=128,
+        num_query=644,
+        memory_len=1024,
+        topk_proposals=256,
+        num_propagated=256,
         with_ego_pos=True,
         match_with_velo=False,
         scalar=10, ##noise groups
@@ -105,10 +109,11 @@ model = dict(
                     type='PETRTemporalDecoderLayer',
                     attn_cfgs=[
                         dict(
-                            type='MultiheadAttention',
+                            type='PETRMultiheadAttention', #fp16 for 2080Ti training (save GPU memory).
                             embed_dims=256,
                             num_heads=8,
-                            dropout=0.1),
+                            dropout=0.1,
+                            fp16=True),
                         dict(
                             type='PETRMultiheadFlashAttention',
                             embed_dims=256,
@@ -117,7 +122,7 @@ model = dict(
                         ],
                     feedforward_channels=2048,
                     ffn_dropout=0.1,
-                    with_cp=True,  ###use checkpoint to save memory
+                    with_cp=False,  ###use checkpoint to save memory
                     operation_order=('self_attn', 'norm', 'cross_attn', 'norm',
                                      'ffn', 'norm')),
             )),
@@ -177,13 +182,13 @@ train_pipeline = [
             translation_std=[0, 0, 0],
             scale_ratio_range=[0.95, 1.05],
             reverse_angle=True,
-            training=True,
+            training=True
             ),
     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
     dict(type='PadMultiViewImage', size_divisor=32),
     dict(type='PETRFormatBundle3D', class_names=class_names, collect_keys=collect_keys + ['prev_exists']),
     dict(type='Collect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img', 'gt_bboxes', 'gt_labels', 'centers2d', 'depths', 'prev_exists'] + collect_keys,
-            meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d', 'gt_labels_3d'))
+             meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape', 'scale_factor', 'flip', 'box_mode_3d', 'box_type_3d', 'img_norm_cfg', 'scene_token', 'gt_bboxes_3d','gt_labels_3d'))
 ]
 test_pipeline = [
     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
@@ -207,15 +212,14 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=batch_size,
+    samples_per_gpu=2,
     workers_per_gpu=4,
     train=dict(
         type=dataset_type,
         data_root=data_root,
         ann_file=data_root + 'nuscenes2d_temporal_infos_train.pkl',
         num_frame_losses=num_frame_losses,
-        seq_split_num=2, # streaming video training
-        seq_mode=True, # streaming video training
+        random_length=1, #for sliding window training
         pipeline=train_pipeline,
         classes=class_names,
         modality=input_modality,
@@ -227,16 +231,16 @@ data = dict(
         box_type_3d='LiDAR'),
     val=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
     test=dict(type=dataset_type, pipeline=test_pipeline, collect_keys=collect_keys + ['img', 'img_metas'], queue_length=queue_length, ann_file=data_root + 'nuscenes2d_temporal_infos_val.pkl', classes=class_names, modality=input_modality),
-    shuffler_sampler=dict(type='InfiniteGroupEachSampleInBatchSampler'),
+    shuffler_sampler=dict(type='DistributedGroupSampler'),
     nonshuffler_sampler=dict(type='DistributedSampler')
     )
 
 optimizer = dict(
     type='AdamW', 
-    lr=4e-4, # bs 8: 2e-4 || bs 16: 4e-4
+    lr=5e-5, # bs 8: 2e-4 || bs 16: 4e-4
     paramwise_cfg=dict(
         custom_keys={
-            'img_backbone': dict(lr_mult=0.1), # set to 0.1 always better when apply 2D pretrained.
+            'img_backbone': dict(lr_mult=0.25), # 0.25 only for Focal-PETR with R50-in1k pretrained weights
         }),
     weight_decay=0.01)
 
@@ -250,10 +254,10 @@ lr_config = dict(
     min_lr_ratio=1e-3,
     )
 
-evaluation = dict(interval=num_iters_per_epoch*num_epochs, pipeline=test_pipeline)
+total_epochs = 24
+evaluation = dict(interval=total_epochs, pipeline=test_pipeline)
 find_unused_parameters=False #### when use checkpoint, find_unused_parameters must be False
-checkpoint_config = dict(interval=num_iters_per_epoch, max_keep_ckpts=3)
-runner = dict(
-    type='IterBasedRunner', max_iters=num_epochs * num_iters_per_epoch)
+checkpoint_config = dict(interval=1, max_keep_ckpts=3)
+runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 load_from=None
 resume_from=None

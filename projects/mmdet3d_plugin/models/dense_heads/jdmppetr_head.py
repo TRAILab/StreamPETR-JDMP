@@ -22,13 +22,14 @@ from mmdet.models.dense_heads.anchor_free_head import AnchorFreeHead
 from mmdet.models.utils.transformer import inverse_sigmoid
 from mmdet3d.core.bbox.coders import build_bbox_coder
 from projects.mmdet3d_plugin.core.bbox.util import normalize_bbox
-
+from projects.mmdet3d_plugin.models.utils.pgp_pred import TrajectoryPredictor
 from mmdet.models.utils import NormedLinear
 from projects.mmdet3d_plugin.models.utils.positional_encoding import pos2posemb3d, pos2posemb1d, nerf_positional_encoding
-from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear
+from projects.mmdet3d_plugin.models.utils.misc import MLN, topk_gather, transform_reference_points, memory_refresh, SELayer_Linear, transform_velocity, transform_rotations
+import math
 
 @HEADS.register_module()
-class StreamPETRHead(AnchorFreeHead):
+class JDMPPETRHead(AnchorFreeHead):
     """Implements the DETR transformer head.
     See `paper: End-to-End Object Detection with Transformers
     <https://arxiv.org/pdf/2005.12872>`_ for details.
@@ -71,10 +72,10 @@ class StreamPETRHead(AnchorFreeHead):
                  num_propagated=256,
                  with_dn=True,
                  with_ego_pos=True,
-                 with_velo_forecast=False,
                  match_with_velo=True,
                  match_costs=None,
-                 transformer=None,
+                 detect_transformer=None,
+                 forecast_transformer=None,
                  sync_cls_avg_factor=False,
                  code_weights=None,
                  bbox_coder=None,
@@ -85,6 +86,7 @@ class StreamPETRHead(AnchorFreeHead):
                      loss_weight=1.0,
                      class_weight=1.0),
                  loss_bbox=dict(type='L1Loss', loss_weight=5.0),
+                 loss_forecast=dict(type='L1Loss', loss_weight=5.0),
                  loss_iou=dict(type='GIoULoss', loss_weight=2.0),
                  train_cfg=dict(
                      assigner=dict(
@@ -97,6 +99,12 @@ class StreamPETRHead(AnchorFreeHead):
                  depth_step=0.8,
                  depth_num=64,
                  LID=False,
+                 forecast_emb_sep=True,
+                 forecast_mem_update=True,
+                 memory_vel_transform=False,
+                 with_map_encoder=False,
+                 with_attn_forecast=True,
+                 with_velo_forecast=False,
                  depth_start = 1,
                  position_range=[-65, -65, -8.0, 65, 65, 8.0],
                  scalar = 5,
@@ -129,7 +137,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.bg_cls_weight = 0
         self.sync_cls_avg_factor = sync_cls_avg_factor
         class_weight = loss_cls.get('class_weight', None)
-        if class_weight is not None and (self.__class__ is StreamPETRHead):
+        if class_weight is not None and (self.__class__ is JDMPPETRHead):
             assert isinstance(class_weight, float), 'Expected ' \
                 'class_weight to have type float. Found ' \
                 f'{type(class_weight)}.'
@@ -166,7 +174,6 @@ class StreamPETRHead(AnchorFreeHead):
         self.num_propagated = num_propagated
         self.with_dn = with_dn
         self.with_ego_pos = with_ego_pos
-        self.with_velo_forecast = with_velo_forecast
         self.match_with_velo = match_with_velo
         self.num_reg_fcs = num_reg_fcs
         self.train_cfg = train_cfg
@@ -179,6 +186,12 @@ class StreamPETRHead(AnchorFreeHead):
         self.LID = LID
         self.depth_start = depth_start
         self.stride=stride
+        self.forecast_emb_sep = forecast_emb_sep
+        self.forecast_mem_update = forecast_mem_update
+        self.memory_vel_transform = memory_vel_transform
+        self.with_map_encoder = with_map_encoder
+        self.with_attn_forecast = with_attn_forecast
+        self.with_velo_forecast = with_velo_forecast
 
         self.scalar = scalar
         self.bbox_noise_scale = noise_scale
@@ -186,14 +199,16 @@ class StreamPETRHead(AnchorFreeHead):
         self.dn_weight = dn_weight
         self.split = split 
 
-        self.act_cfg = transformer.get('act_cfg',
+        self.act_cfg = detect_transformer.get('act_cfg',
                                        dict(type='ReLU', inplace=True))
-        self.num_pred = transformer['decoder']['num_layers']
+        self.num_pred = detect_transformer['decoder']['num_layers']
+        self.num_pred_forecast = forecast_transformer['decoder']['num_layers']
         self.normedlinear = normedlinear
-        super(StreamPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
+        super(JDMPPETRHead, self).__init__(num_classes, in_channels, init_cfg = init_cfg)
 
         self.loss_cls = build_loss(loss_cls)
         self.loss_bbox = build_loss(loss_bbox)
+        self.loss_forecast = build_loss(loss_forecast)
         self.loss_iou = build_loss(loss_iou)
 
         if self.loss_cls.use_sigmoid:
@@ -201,7 +216,9 @@ class StreamPETRHead(AnchorFreeHead):
         else:
             self.cls_out_channels = num_classes + 1
 
-        self.transformer = build_transformer(transformer)
+        self.detect_transformer = build_transformer(detect_transformer)
+        if self.with_attn_forecast:
+            self.forecast_transformer = build_transformer(forecast_transformer)
 
         self.code_weights = nn.Parameter(torch.tensor(
             self.code_weights), requires_grad=False)
@@ -228,6 +245,8 @@ class StreamPETRHead(AnchorFreeHead):
             coords_d = self.depth_start + bin_size * index
 
         self.coords_d = nn.Parameter(coords_d, requires_grad=False)
+        if self.with_map_encoder:
+            self.pgp = TrajectoryPredictor(nusc_dataroot='/proj/data/nuscenes')
 
         self._init_layers()
         self.reset_memory()
@@ -253,10 +272,21 @@ class StreamPETRHead(AnchorFreeHead):
         reg_branch.append(Linear(self.embed_dims, self.code_size))
         reg_branch = nn.Sequential(*reg_branch)
 
+        if self.with_attn_forecast:
+            forecast_reg_branch = []
+            for _ in range(self.num_reg_fcs):
+                forecast_reg_branch.append(Linear(self.embed_dims, self.embed_dims))
+                forecast_reg_branch.append(nn.ReLU())
+            forecast_reg_branch.append(Linear(self.embed_dims, self.code_size))
+            forecast_reg_branch = nn.Sequential(*forecast_reg_branch)
+
         self.cls_branches = nn.ModuleList(
             [fc_cls for _ in range(self.num_pred)])
         self.reg_branches = nn.ModuleList(
             [reg_branch for _ in range(self.num_pred)])
+        if self.with_attn_forecast:
+            self.forecast_reg_branches = nn.ModuleList(
+                [forecast_reg_branch for _ in range(self.num_pred_forecast)])
 
         self.position_encoder = nn.Sequential(
                 nn.Linear(self.position_dim, self.embed_dims*4),
@@ -283,6 +313,12 @@ class StreamPETRHead(AnchorFreeHead):
             nn.ReLU(),
             nn.Linear(self.embed_dims, self.embed_dims),
         )
+        if self.forecast_emb_sep:
+            self.forecast_query_embedding = nn.Sequential(
+                nn.Linear(self.embed_dims*3//2, self.embed_dims),
+                nn.ReLU(),
+                nn.Linear(self.embed_dims, self.embed_dims),
+            )
 
         self.spatial_alignment = MLN(8)
 
@@ -290,11 +326,32 @@ class StreamPETRHead(AnchorFreeHead):
             nn.Linear(self.embed_dims, self.embed_dims),
             nn.LayerNorm(self.embed_dims)
         )
+        if self.forecast_emb_sep:
+            self.forecast_time_embedding = nn.Sequential(
+            nn.Linear(self.embed_dims, self.embed_dims),
+            nn.LayerNorm(self.embed_dims)
+            )
 
         # encoding ego pose
         if self.with_ego_pos:
             self.ego_pose_pe = MLN(180)
             self.ego_pose_memory = MLN(180)
+        if self.forecast_emb_sep:
+            self.forecast_ego_pose_pe = MLN(180)
+            self.forecast_ego_pose_memory = MLN(180)
+        if not self.with_ego_pos and not self.forecast_emb_sep:
+            self.ego_pose_pe = MLN(180)
+            self.ego_pose_memory = MLN(180)
+
+        # Map encoder
+        if self.with_map_encoder:
+            self.map_topk_nodes = 32
+            self.map_feat_size = 6
+            self.map_emb_size = 16
+            self.map_enc_size = 32
+            self.map_node_emb = nn.Linear(self.map_feat_size, self.map_emb_size)
+            self.map_node_encoder = nn.GRU(self.map_emb_size, self.map_enc_size, batch_first=True)
+            self.map_leaky_relu = nn.LeakyReLU()
 
     def init_weights(self):
         """Initialize weights of the transformer head."""
@@ -304,12 +361,13 @@ class StreamPETRHead(AnchorFreeHead):
             nn.init.uniform_(self.pseudo_reference_points.weight.data, 0, 1)
             self.pseudo_reference_points.weight.requires_grad = False
 
-        self.transformer.init_weights()
+        self.detect_transformer.init_weights()
+        if self.with_attn_forecast:
+            self.forecast_transformer.init_weights()
         if self.loss_cls.use_sigmoid:
             bias_init = bias_init_with_prob(0.01)
             for m in self.cls_branches:
                 nn.init.constant_(m[-1].bias, bias_init)
-
 
     def reset_memory(self):
         self.memory_embedding = None
@@ -317,6 +375,7 @@ class StreamPETRHead(AnchorFreeHead):
         self.memory_timestamp = None
         self.memory_egopose = None
         self.memory_velo = None
+        self.memory_rotation = None
 
     def pre_update_memory(self, data):
         x = data['prev_exists']
@@ -328,15 +387,21 @@ class StreamPETRHead(AnchorFreeHead):
             self.memory_timestamp = x.new_zeros(B, self.memory_len, 1)
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
             self.memory_velo = x.new_zeros(B, self.memory_len, 2)
+            self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
+            # self.memory_timestamp[:, :self.num_propagated] = 0
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
             self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+            self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])
+            if self.memory_vel_transform:
+                self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose_inv'])
             self.memory_timestamp = memory_refresh(self.memory_timestamp[:, :self.memory_len], x)
             self.memory_reference_point = memory_refresh(self.memory_reference_point[:, :self.memory_len], x)
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
+            self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
         
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
@@ -351,12 +416,18 @@ class StreamPETRHead(AnchorFreeHead):
             rec_memory = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
             rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
+            rec_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
+            rec_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
         else:
             rec_reference_points = all_bbox_preds[..., :3][-1]
             rec_velo = all_bbox_preds[..., -2:][-1]
             rec_memory = outs_dec[-1]
             rec_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
             rec_timestamp = torch.zeros_like(rec_score, dtype=torch.float64)
+            rec_rot_sine = all_bbox_preds[..., 6:7][-1]
+            rec_rot_cosine = all_bbox_preds[..., 7:8][-1]
+            rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
         
         # topk proposals
         _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=1)
@@ -365,15 +436,20 @@ class StreamPETRHead(AnchorFreeHead):
         rec_memory = topk_gather(rec_memory, topk_indexes).detach()
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
         rec_velo = topk_gather(rec_velo, topk_indexes).detach()
+        rec_rotation = topk_gather(rec_rotation, topk_indexes).detach()
 
         self.memory_embedding = torch.cat([rec_memory, self.memory_embedding], dim=1)
         self.memory_timestamp = torch.cat([rec_timestamp, self.memory_timestamp], dim=1)
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
         self.memory_reference_point = torch.cat([rec_reference_points, self.memory_reference_point], dim=1)
         self.memory_velo = torch.cat([rec_velo, self.memory_velo], dim=1)
+        self.memory_rotation = torch.cat([rec_rotation, self.memory_rotation], dim=1)
         self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose'], reverse=False)
         self.memory_timestamp -= data['timestamp'].unsqueeze(-1).unsqueeze(-1)
         self.memory_egopose = data['ego_pose'].unsqueeze(1) @ self.memory_egopose
+        self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose'])
+        if self.memory_vel_transform:
+            self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose'])
 
     def position_embeding(self, data, memory_centers, topk_indexes, img_metas):
         eps = 1e-5
@@ -402,7 +478,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         coords = coords.unsqueeze(-1)
 
-        img2lidars = torch.inverse(data['lidar2img'].cpu()).cuda()
+        img2lidars = data['lidar2img'].inverse()
         img2lidars = img2lidars.view(BN, 1, 1, 4, 4).repeat(1, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
         img2lidars = topk_gather(img2lidars, topk_indexes)
 
@@ -422,7 +498,10 @@ class StreamPETRHead(AnchorFreeHead):
     def temporal_alignment(self, query_pos, tgt, reference_points):
         B = query_pos.size(0)
 
-        temp_reference_point = (self.memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        prop_mem_ref_point = self.memory_reference_point.clone()
+        if self.with_velo_forecast:
+            prop_mem_ref_point[:, self.num_propagated:] = self.memory_reference_point[:, self.num_propagated:] + torch.nn.functional.pad(self.memory_velo[:, self.num_propagated:], (0,1)) * self.memory_timestamp[:, self.num_propagated:].float()
+        temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
         temp_memory = self.memory_embedding
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
@@ -449,6 +528,230 @@ class StreamPETRHead(AnchorFreeHead):
             temp_pos = temp_pos[:, self.num_propagated:]
             
         return tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose
+    
+
+    def forecast_alignment(self, data):
+        memory_timestamp = self.memory_timestamp + data['timestamp'].unsqueeze(-1).unsqueeze(-1)
+        memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
+        memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+        temp_reference_point = (memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        if self.forecast_emb_sep:
+            temp_pos = self.forecast_query_embedding(pos2posemb3d(temp_reference_point))
+        else:
+            temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
+        temp_memory = self.memory_embedding
+        B = temp_pos.size(0)
+        
+        if self.with_ego_pos:
+            memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
+            memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
+            if self.forecast_emb_sep:
+                temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
+                temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
+            else:
+                temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
+                temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
+
+        if self.forecast_emb_sep:
+            temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
+        else: 
+            temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
+
+        if self.num_propagated > 0:
+            tgt = temp_memory[:, :self.num_propagated]
+            query_pos = temp_pos[:, :self.num_propagated]
+            reference_points = temp_reference_point[:, :self.num_propagated]
+            temp_memory = temp_memory[:, self.num_propagated:]
+            temp_pos = temp_pos[:, self.num_propagated:]
+            
+        return tgt, query_pos, reference_points, temp_memory, temp_pos
+
+    def map_encoding(self, sample_idx, global2ego_3dpose_matrix):
+        # Params for map encoding TODO: move to config
+        TOPN = self.map_topk_nodes
+        F = self.map_feat_size
+        debug = False
+        B, A, N, E = global2ego_3dpose_matrix.size(0), self.num_propagated, self.pgp.max_nodes, self.pgp.polyline_length
+        device = global2ego_3dpose_matrix.device
+
+        # Extract detection and ego poses
+        global2det_2dposition = self.memory_reference_point[:, :self.num_propagated, :2]
+        global2det_yaw = self.memory_rotation[:, :self.num_propagated]
+        global2det_yaw = global2det_yaw + torch.tensor(math.pi)/2
+        global2det_pose2d_vec = torch.cat([global2det_2dposition, global2det_yaw], dim=-1)
+        det2global_pose2d_mat =  self.pose2d_vec_to_matinv(global2det_pose2d_vec)
+        global2ego_2dposition = global2ego_3dpose_matrix[:, :2, 3]
+        global2ego_yaw = torch.atan2(global2ego_3dpose_matrix[:, 1, 0], global2ego_3dpose_matrix[:, 0, 0]) 
+        global2ego_yaw = global2ego_yaw + torch.tensor(math.pi)/2
+        global2ego_pose2d_vec = torch.cat([global2ego_2dposition, global2ego_yaw.unsqueeze(-1)], dim=-1)
+        global2ego_pose2d_mat = self.pose2d_vec_to_mat(global2ego_pose2d_vec)
+
+        # Get map features in ego frame # TODO: vectorize loop or cache ego map feats, currently takes 0.5s per ego pose
+        ego_map_feats = torch.zeros(B, N, E, F).to(device)
+        ego_map_masks = torch.zeros(B, N, E, F).to(device)
+        for b in range(B):
+            ego_map_representation = self.pgp.get_map_representation(global2ego_pose2d_vec[b].tolist(), sample_idx[b])
+            ego_map_feats[b] = torch.from_numpy(ego_map_representation['lane_node_feats']).float().to(device)
+            ego_map_masks[b] = torch.from_numpy(ego_map_representation['lane_node_masks']).float().to(device)
+        ego2node_pose2d_vec = ego_map_feats[..., :3]
+        ego2node_pose2d_mat = self.pose2d_vec_to_mat(ego2node_pose2d_vec)
+        
+        # Get transformations for agent to map node in ego frame (new)
+        det2ego_pose2d_mat = torch.matmul(det2global_pose2d_mat.unsqueeze(2).unsqueeze(2).expand(B,A,N,E,3,3),
+                                          global2ego_pose2d_mat.unsqueeze(1).unsqueeze(1).unsqueeze(1).expand(B,A,N,E,3,3))
+        det2ego_pose2d_vec = torch.cat([det2ego_pose2d_mat[..., 0:2, 2],
+            torch.atan2(det2ego_pose2d_mat[..., 1, 0], det2ego_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        ego2det_pose2d_mat = self.pose2d_vec_to_matinv(det2ego_pose2d_vec)
+        det2ego_pose2d_mat[..., 0:2, 0:2] = torch.eye(2, device=device).unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(0).expand(B,A,N,E,2,2)
+        det2ego_pose2d_mat[...,0:2, 2] = - ego2det_pose2d_mat[..., 0:2, 2]
+        det2node_pose2d_mat = torch.matmul(det2ego_pose2d_mat, ego2node_pose2d_mat.unsqueeze(1).expand(B,A,N,E,3,3))
+        det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], 
+            torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        
+        # Get transformations for agent to map node in agent frame (old)
+        # global2node_pose2d_mat = torch.matmul(global2ego_pose2d_mat.unsqueeze(1).unsqueeze(1).unsqueeze(1).expand(B,A,N,E,3,3), 
+        #                                       ego2node_pose2d_mat.unsqueeze(1).expand(B,A,N,E,3,3))
+        # det2node_pose2d_mat = torch.matmul(det2global_pose2d_mat.unsqueeze(2).unsqueeze(2).expand(B,A,N,E,3,3), 
+        #                                    global2node_pose2d_mat)            
+        # det2node_pose2d_vec = torch.cat([det2node_pose2d_mat[..., 0:2, 2], 
+        #     torch.atan2(det2node_pose2d_mat[..., 1, 0], det2node_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        
+        # Transform map features to agent frame and get topk nearest nodes
+        det_map_feats = ego_map_feats.unsqueeze(1).expand(B,A,N,E,F).clone()
+        det_map_masks = ego_map_masks.unsqueeze(1).expand(B,A,N,E,F)
+        det_map_feats[..., :3] = det2node_pose2d_vec
+        det2node_dist = torch.norm(det2node_pose2d_vec[..., :2], dim=-1)
+        det2node_dist = torch.min(det2node_dist, -1).values
+        _, topk_indices = torch.topk(det2node_dist, TOPN, dim=2, largest=False)
+        expanded_topk_indices = topk_indices.unsqueeze(-1).unsqueeze(-1).expand(B, A, TOPN, E, F)
+        det_map_feats = torch.gather(det_map_feats, 2, expanded_topk_indices)
+        det_map_masks = torch.gather(det_map_masks, 2, expanded_topk_indices)
+        if debug:
+            for b in range(B):
+                self.plot_map_feats(sample_idx[b], det2ego_pose2d_vec[b,:,0,0], global2det_pose2d_vec[b],
+                                    det_map_feats[b], det_map_masks[b], ego_map_feats[b], ego_map_masks[b])
+        map_embedding = self.map_leaky_relu(self.map_node_emb(det_map_feats))
+        map_encoding = self.map_variable_size_gru_encode(map_embedding, det_map_masks, self.map_node_encoder)
+        return map_encoding
+
+    def plot_map_feats(self, sample_idx, det2ego_pose2d_vec_b, global2det_pose2d_vec_b,
+                       det_lane_node_feats_b, det_lane_node_masks_b, ego_lane_node_feats_b, ego_lane_node_masks_b):
+        # Debug plots for a single agent and batch
+        import matplotlib.pyplot as plt
+        agent_id = 0
+        arrow_width = 0.5
+        scatter_size = 10
+        out_dir = '/proj/output/viz/map_debug_new'
+
+        # Select agent
+        global2det_pose2d_vec = global2det_pose2d_vec_b.detach().cpu().numpy()[agent_id]
+        det_lane_node_feats = det_lane_node_feats_b.detach().cpu().numpy()[agent_id]
+        det_lane_node_masks = det_lane_node_masks_b.detach().cpu().numpy()[agent_id]
+        ego_lane_node_feats = ego_lane_node_feats_b.detach().cpu().numpy()
+        ego_lane_node_masks = ego_lane_node_masks_b.detach().cpu().numpy()
+        ego2det_pose2d_mat = self.pose2d_vec_to_matinv(det2ego_pose2d_vec_b)
+        ego2det_pose2d_vec = torch.cat([ego2det_pose2d_mat[..., 0:2, 2], 
+            torch.atan2(ego2det_pose2d_mat[..., 1, 0], ego2det_pose2d_mat[..., 0, 0]).unsqueeze(-1)], dim=-1)
+        ego2det_pose2d_vec = ego2det_pose2d_vec.detach().cpu().numpy()[agent_id]
+        det2ego_pose2d_vec = det2ego_pose2d_vec_b.detach().cpu().numpy()[agent_id]
+
+        # Plot map in agent frame, compare transformed to original
+        det_map_representation = self.pgp.get_map_representation(global2det_pose2d_vec.tolist(), sample_idx, True)
+        test_det_lane_node_feats = det_map_representation['lane_node_feats']
+        test_det_lane_node_masks = det_map_representation['lane_node_masks']
+        plt.figure(figsize=(10, 10))
+        for i in range(test_det_lane_node_feats.shape[0]):
+            mask = test_det_lane_node_masks[i, :, 0] == 0
+            position = test_det_lane_node_feats[i, :, :2][mask]
+            plt.plot(position[:, 0], position[:, 1], color='blue', alpha=0.6)
+        for i in range(det_lane_node_feats.shape[0]):
+            mask = det_lane_node_masks[i, :, 0] == 0
+            position = det_lane_node_feats[i, :, :2][mask]
+            plt.plot(position[:, 0], position[:, 1], color='red', alpha=0.6)
+        plt.scatter(det2ego_pose2d_vec[0], det2ego_pose2d_vec[1], c='green', s=scatter_size)
+        plt.arrow(det2ego_pose2d_vec[0], det2ego_pose2d_vec[1],
+                  5*math.cos(det2ego_pose2d_vec[2]), 5*math.sin(det2ego_pose2d_vec[2]), 
+                  width=arrow_width, fc='g', ec='g')
+        plt.scatter(0, 0, c='red', s=scatter_size)
+        plt.arrow(0, 0, 5, 0, width=arrow_width, fc='r', ec='r')
+        plt.xlabel('X Position Agent')
+        plt.ylabel('Y Position Agent')
+        plt.grid(True)
+        plt.savefig(out_dir+'/sample_'+sample_idx+'_map_encoder_agentframe.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        # Plot map in ego frame
+        plt.figure(figsize=(10, 10))
+        for i in range(ego_lane_node_feats.shape[0]):
+            mask = ego_lane_node_masks[i, :, 0] == 0
+            position = ego_lane_node_feats[i, :, :2][mask]
+            plt.plot(position[:, 0], position[:, 1], color='green', alpha=0.6)
+        plt.scatter(ego2det_pose2d_vec[0], ego2det_pose2d_vec[1], c='red', s=scatter_size)
+        plt.arrow(ego2det_pose2d_vec[0], ego2det_pose2d_vec[1], 
+                  5*math.cos(ego2det_pose2d_vec[2]), 5*math.sin(ego2det_pose2d_vec[2]), 
+                  width=arrow_width, fc='r', ec='r')
+        plt.scatter(0, 0, c='green', s=scatter_size)
+        plt.arrow(0, 0, 5, 0, width=arrow_width, fc='g', ec='g')
+        plt.xlabel('X Position Ego')
+        plt.ylabel('Y Position Ego')
+        plt.grid(True)
+        plt.savefig(out_dir+'/sample_'+sample_idx+'_map_encoder_egoframe.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print('Saved map encoder plots to '+out_dir+' for sample '+sample_idx)
+            
+    def pose2d_vec_to_mat(self, pose2d_vec):
+        pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
+        pose2d_mat[..., 0, 0] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0, 1] = -torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 0] = torch.sin(pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 1] = torch.cos(pose2d_vec[..., 2])
+        pose2d_mat[..., 0:2, 2] = pose2d_vec[..., 0:2]
+        return pose2d_mat
+    
+    def pose2d_vec_to_matinv(self, pose2d_vec):
+        pose2d_mat = torch.eye(3, device=pose2d_vec.device).expand(*pose2d_vec.size()[:-1], 3, 3).clone()
+        pose2d_mat[..., 0, 0] = torch.cos(-pose2d_vec[..., 2])
+        pose2d_mat[..., 0, 1] = -torch.sin(-pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 0] = torch.sin(-pose2d_vec[..., 2])
+        pose2d_mat[..., 1, 1] = torch.cos(-pose2d_vec[..., 2])
+        pose2d_mat[..., 0:2, 2] = -torch.matmul(pose2d_mat[...,0:2,0:2], pose2d_vec[..., 0:2].unsqueeze(-1)).squeeze(-1)
+        return pose2d_mat
+
+    @staticmethod
+    def map_variable_size_gru_encode(feat_embedding: torch.Tensor, masks: torch.Tensor, gru: nn.GRU) -> torch.Tensor:
+        """
+        Returns GRU encoding for a batch of inputs where each sample in the batch is a set of a variable number
+        of sequences, of variable lengths.
+        """
+
+        # Form a large batch of all sequences in the batch
+        masks_for_batching = ~masks[:, :, :, :, 0].bool()
+        masks_for_batching = masks_for_batching.any(dim=-1).unsqueeze(3).unsqueeze(4)
+        feat_embedding_batched = torch.masked_select(feat_embedding, masks_for_batching)
+        feat_embedding_batched = feat_embedding_batched.view(-1, feat_embedding.shape[3], feat_embedding.shape[4])
+
+        # Pack padded sequences
+        seq_lens = torch.sum(1 - masks[:, :, :, :, 0], dim=-1)
+        seq_lens_batched = seq_lens[seq_lens != 0].cpu()
+        if len(seq_lens_batched) != 0:
+            feat_embedding_packed = torch.nn.utils.rnn.pack_padded_sequence(
+                feat_embedding_batched, seq_lens_batched, batch_first=True, enforce_sorted=False)
+
+            # Encode
+            _, encoding_batched = gru(feat_embedding_packed)
+            encoding_batched = encoding_batched.squeeze(0)
+
+            # Scatter back to appropriate batch index
+            masks_for_scattering = masks_for_batching.squeeze(4).repeat(1, 1, 1, encoding_batched.shape[-1])
+            encoding = torch.zeros(masks_for_scattering.shape, device=feat_embedding.device)
+            encoding = encoding.masked_scatter(masks_for_scattering, encoding_batched)
+
+        else:
+            batch_size = feat_embedding.shape[0]
+            max_num = feat_embedding.shape[1]
+            hidden_state_size = gru.hidden_size
+            encoding = torch.zeros((batch_size, max_num, hidden_state_size), device=feat_embedding.device)
+        return encoding
 
     def prepare_for_dn(self, batch_size, reference_points, img_metas):
         if self.training and self.with_dn:
@@ -544,7 +847,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         # Names of some parameters in has been changed.
         version = local_metadata.get('version', None)
-        if (version is None or version < 2) and self.__class__ is StreamPETRHead:
+        if (version is None or version < 2) and self.__class__ is JDMPPETRHead:
             convert_dict = {
                 '.self_attn.': '.attentions.0.',
                 # '.ffn.': '.ffns.0.',
@@ -563,7 +866,7 @@ class StreamPETRHead(AnchorFreeHead):
               self)._load_from_state_dict(state_dict, prefix, local_metadata,
                                           strict, missing_keys,
                                           unexpected_keys, error_msgs)
-
+    
 
     def forward(self, memory_center, img_metas, topk_indexes=None,  **data):
         """Forward function.
@@ -605,8 +908,7 @@ class StreamPETRHead(AnchorFreeHead):
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = self.temporal_alignment(query_pos, tgt, reference_points)
 
         # transformer here is a little different from PETR
-        outs_dec, _ = self.transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
-
+        outs_dec, _ = self.detect_transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
         outs_dec = torch.nan_to_num(outs_dec)
         outputs_classes = []
         outputs_coords = []
@@ -629,6 +931,54 @@ class StreamPETRHead(AnchorFreeHead):
         
         # update the memory bank
         self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
+        
+        if self.with_attn_forecast:
+            # Prepare for forecasting
+            forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
+                forecast_temp_pos = self.forecast_alignment(data)
+            forecast_attn_mask = None
+            if self.with_map_encoder:
+                sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+                map_encoding = self.map_encoding(sample_idx, data['ego_pose'])
+
+            # Forecasting
+            outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask, forecast_temp_memory, forecast_temp_pos)
+            outs_forecast_dec = torch.nan_to_num(outs_forecast_dec)
+            outputs_forecast_coords = []
+            for lvl in range(outs_forecast_dec.shape[0]):
+                reference = inverse_sigmoid(forecast_reference_points.clone())
+                assert reference.shape[-1] == 3
+                tmp = self.forecast_reg_branches[lvl](outs_forecast_dec[lvl])
+
+                tmp[..., 0:3] += reference[..., 0:3]
+                tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
+
+                outputs_forecast_coord = tmp
+                outputs_forecast_coords.append(outputs_forecast_coord)
+
+            all_forecast_preds = torch.stack(outputs_forecast_coords)
+            all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
+
+        elif self.with_velo_forecast:
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
+                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:]
+                rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :].sigmoid().topk(1, dim=-1).values[..., 0:1]
+            else:
+                rec_reference_points = all_bbox_preds[..., :3]
+                rec_velo = all_bbox_preds[..., -2:]
+                rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
+            _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
+            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
+            rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
+            topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
+            rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
+            rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
+            all_forecast_preds = rec_reference_points + rec_velo * 0.5
+        if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
+            forecast_points = all_forecast_preds[-1][...,:3].detach()
+            self.memory_reference_point[:, :self.num_propagated] = forecast_points
+            # self.memory_embedding[:, :outs_forecast_dec[-1].size(1)] = outs_forecast_dec[-1].detach()
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
@@ -646,22 +996,9 @@ class StreamPETRHead(AnchorFreeHead):
             outs = {
                 'all_cls_scores': all_cls_scores,
                 'all_bbox_preds': all_bbox_preds,
-                'dn_mask_dict':None,
+                'dn_mask_dict': None,
             }
-
-        # Constant velocity forecast
-        if self.with_velo_forecast:
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
-                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:][-1]
-            else:
-                rec_reference_points = all_bbox_preds[..., :3][-1]
-                rec_velo = all_bbox_preds[..., -2:][-1]
-            num_future_frames = 12
-            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) + \
-                rec_velo.unsqueeze(-2).repeat(1, 1, num_future_frames + 1, 1) * pred_dts
-            outs['all_forecast_preds'] = all_forecast_preds
+        outs['all_forecast_preds'] = all_forecast_preds
 
         return outs
     
@@ -687,8 +1024,11 @@ class StreamPETRHead(AnchorFreeHead):
     def _get_target_single(self,
                            cls_score,
                            bbox_pred,
+                           forecast_pred,
                            gt_labels,
                            gt_bboxes,
+                           gt_forecasting_bboxes_3d, 
+                           gt_forecasting_masks,
                            gt_bboxes_ignore=None):
         """"Compute regression and classification targets for one image.
         Outputs from a single decoder layer of a single feature level are used.
@@ -740,14 +1080,46 @@ class StreamPETRHead(AnchorFreeHead):
             bbox_targets[pos_inds] = sampling_result.pos_gt_bboxes
             bbox_weights[pos_inds] = 1.0
             labels[pos_inds] = gt_labels[sampling_result.pos_assigned_gt_inds]
+        
+        # forecast assignment
+        self.forecast_threshold = 2.0 # TODO: add to config
+        rec_score = cls_score.sigmoid().topk(1, dim=-1).values
+        _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=0)
+        topk_bbox_pred = torch.gather(bbox_pred, 0, topk_indexes.repeat(1, bbox_pred.size(1)))
+        num_gts, num_bboxes = gt_bboxes.size(0), topk_bbox_pred.size(0)
+        if num_gts == 0 or num_bboxes == 0:
+            matched_pred_inds = torch.tensor([], device=bbox_pred.device)
+            matched_gt_inds = torch.tensor([], device=bbox_pred.device)
+        else:       
+            dist = torch.cdist(topk_bbox_pred[:, :3], gt_bboxes[:, :3], p=2)
+            dist = torch.nan_to_num(dist, nan=100.0, posinf=100.0, neginf=-100.0)
+            matched_gt_inds = dist.argmin(dim=1)
+            matched_pred_inds = torch.arange(num_bboxes, device=bbox_pred.device)
+            matched_dist = dist[matched_pred_inds, matched_gt_inds]
+            matched_gt_inds = matched_gt_inds[matched_dist < self.forecast_threshold]
+            matched_pred_inds = matched_pred_inds[matched_dist < self.forecast_threshold]
+
+        # forecast targets
+        code_size = gt_forecasting_bboxes_3d.size(-1)
+        if forecast_pred.size(-1) == 3:
+            code_size = 3
+        forecast_weights = torch.zeros_like(forecast_pred)
+        forecast_targets = torch.zeros_like(forecast_pred)[..., :code_size]
+        forecast_indices = [1]
+        if sampling_result.num_gts > 0:
+            forecast_targets[matched_pred_inds] = gt_forecasting_bboxes_3d[matched_gt_inds, forecast_indices, :code_size].float()
+            forecast_weights[matched_pred_inds] = gt_forecasting_masks[matched_gt_inds, forecast_indices].float().unsqueeze(-1)
         return (labels, label_weights, bbox_targets, bbox_weights, 
-                pos_inds, neg_inds)
+                forecast_targets, forecast_weights, pos_inds, neg_inds)
 
     def get_targets(self,
                     cls_scores_list,
                     bbox_preds_list,
+                    forecast_preds_list,
                     gt_bboxes_list,
                     gt_labels_list,
+                    gt_forecasting_bboxes_3d_list, 
+                    gt_forecasting_masks_list,
                     gt_bboxes_ignore_list=None):
         """"Compute regression and classification targets for a batch image.
         Outputs from a single decoder layer of a single feature level are used.
@@ -786,19 +1158,26 @@ class StreamPETRHead(AnchorFreeHead):
         ]
 
         (labels_list, label_weights_list, bbox_targets_list,
-         bbox_weights_list, pos_inds_list, neg_inds_list) = multi_apply(
-             self._get_target_single, cls_scores_list, bbox_preds_list,
-             gt_labels_list, gt_bboxes_list, gt_bboxes_ignore_list)
+         bbox_weights_list, forecast_targets_list, forecast_weights_list,
+         pos_inds_list, neg_inds_list) = multi_apply(
+             self._get_target_single, cls_scores_list, bbox_preds_list, forecast_preds_list,
+             gt_labels_list, gt_bboxes_list, 
+             gt_forecasting_bboxes_3d_list, gt_forecasting_masks_list,
+             gt_bboxes_ignore_list)
         num_total_pos = sum((inds.numel() for inds in pos_inds_list))
         num_total_neg = sum((inds.numel() for inds in neg_inds_list))
         return (labels_list, label_weights_list, bbox_targets_list,
-                bbox_weights_list, num_total_pos, num_total_neg)
+                bbox_weights_list, forecast_targets_list, forecast_weights_list,
+                num_total_pos, num_total_neg)
 
     def loss_single(self,
                     cls_scores,
                     bbox_preds,
+                    forecast_preds,
                     gt_bboxes_list,
                     gt_labels_list,
+                    gt_forecasting_bboxes_3d, 
+                    gt_forecasting_masks,
                     gt_bboxes_ignore_list=None):
         """"Loss function for outputs from a single decoder layer of a single
         feature level.
@@ -821,15 +1200,21 @@ class StreamPETRHead(AnchorFreeHead):
         num_imgs = cls_scores.size(0)
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
         bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
-        cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list,
-                                           gt_bboxes_list, gt_labels_list, 
+        num_imgs = forecast_preds.size(0)
+        forecast_preds_list = [forecast_preds[i] for i in range(num_imgs)]
+        cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, forecast_preds_list,
+                                           gt_bboxes_list, gt_labels_list,
+                                           gt_forecasting_bboxes_3d, gt_forecasting_masks,
                                            gt_bboxes_ignore_list)
         (labels_list, label_weights_list, bbox_targets_list, bbox_weights_list,
+         forecast_targets_list, forecast_weights_list, 
          num_total_pos, num_total_neg) = cls_reg_targets
         labels = torch.cat(labels_list, 0)
         label_weights = torch.cat(label_weights_list, 0)
         bbox_targets = torch.cat(bbox_targets_list, 0)
         bbox_weights = torch.cat(bbox_weights_list, 0)
+        forecast_targets = torch.cat(forecast_targets_list, 0)
+        forecast_weights = torch.cat(forecast_weights_list, 0)
 
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.cls_out_channels)
@@ -858,9 +1243,19 @@ class StreamPETRHead(AnchorFreeHead):
         loss_bbox = self.loss_bbox(
                 bbox_preds[isnotnan, :10], normalized_bbox_targets[isnotnan, :10], bbox_weights[isnotnan, :10], avg_factor=num_total_pos)
 
+        # forecast loss
+        forecast_avg_factor = torch.hstack([t[:,0].sum() for t in forecast_weights_list]).sum() 
+        forecast_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_avg_factor))
+        forecast_avg_factor = max(forecast_avg_factor, 1.)
+        forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-1))
+        isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
+        loss_forecast = self.loss_forecast(
+            forecast_preds[isnotnan, :1], forecast_targets[isnotnan, :1], forecast_weights[isnotnan, :1], avg_factor=forecast_avg_factor)
+
         loss_cls = torch.nan_to_num(loss_cls)
         loss_bbox = torch.nan_to_num(loss_bbox)
-        return loss_cls, loss_bbox
+        loss_forecast = torch.nan_to_num(loss_forecast)
+        return loss_cls, loss_bbox, loss_forecast
 
    
     def dn_loss_single(self,
@@ -925,6 +1320,8 @@ class StreamPETRHead(AnchorFreeHead):
     def loss(self,
              gt_bboxes_list,
              gt_labels_list,
+             gt_forecasting_bboxes_3d, 
+             gt_forecasting_masks,
              preds_dicts,
              gt_bboxes_ignore=None):
         """"Loss function.
@@ -959,6 +1356,7 @@ class StreamPETRHead(AnchorFreeHead):
 
         all_cls_scores = preds_dicts['all_cls_scores']
         all_bbox_preds = preds_dicts['all_bbox_preds']
+        all_forecast_preds = preds_dicts['all_forecast_preds']
 
         num_dec_layers = len(all_cls_scores)
         device = gt_labels_list[0].device
@@ -971,10 +1369,17 @@ class StreamPETRHead(AnchorFreeHead):
         all_gt_bboxes_ignore_list = [
             gt_bboxes_ignore for _ in range(num_dec_layers)
         ]
+        all_gt_forecasting_bboxes_3d = [
+            gt_forecasting_bboxes_3d for _ in range(num_dec_layers)
+        ]
+        all_gt_forecasting_masks = [
+            gt_forecasting_masks for _ in range(num_dec_layers)
+        ]
 
-        losses_cls, losses_bbox = multi_apply(
-            self.loss_single, all_cls_scores, all_bbox_preds,
-            all_gt_bboxes_list, all_gt_labels_list, 
+        losses_cls, losses_bbox, losses_forecast = multi_apply(
+            self.loss_single, all_cls_scores, all_bbox_preds, all_forecast_preds,
+            all_gt_bboxes_list, all_gt_labels_list,
+            all_gt_forecasting_bboxes_3d, all_gt_forecasting_masks,
             all_gt_bboxes_ignore_list)
 
         loss_dict = dict()
@@ -983,6 +1388,7 @@ class StreamPETRHead(AnchorFreeHead):
         # loss from the last decoder layer
         loss_dict['loss_cls'] = losses_cls[-1]
         loss_dict['loss_bbox'] = losses_bbox[-1]
+        loss_dict['loss_forecast'] = losses_forecast[-1]
 
         # loss from other decoder layers
         num_dec_layer = 0
@@ -990,6 +1396,7 @@ class StreamPETRHead(AnchorFreeHead):
                                            losses_bbox[:-1]):
             loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
             loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
+            loss_dict[f'd{num_dec_layer}.loss_forecast'] = losses_forecast[num_dec_layer]
             num_dec_layer += 1
         
         if preds_dicts['dn_mask_dict'] is not None:
@@ -1051,16 +1458,4 @@ class StreamPETRHead(AnchorFreeHead):
             scores = preds['scores']
             labels = preds['labels']
             ret_list.append([bboxes, scores, labels])
-        return ret_list
-
-    @force_fp32(apply_to=('preds_dicts'))
-    def get_forecasts(self, preds_dicts):
-        """Generate bboxes from bbox head predictions.
-        Args:
-            preds_dicts (tuple[list[dict]]): Prediction results.
-            img_metas (list[dict]): Point cloud and image's meta info.
-        Returns:
-            list[dict]: Decoded bbox, scores and labels after nms.
-        """
-        ret_list = preds_dicts['all_forecast_preds'] if 'all_forecast_preds' in preds_dicts else None
         return ret_list
