@@ -1609,8 +1609,11 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # TODO: fix workaround for calling loss_single twice due to different number of detect and forecast decoder layers
         # Separate losses and only call them when needed (check frozen)
-        assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
-        n_layers = self.forecast_transformer.num_forecast_layers
+        if hasattr(self, 'forecast_transformer'):
+            assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
+            n_layers = self.forecast_transformer.num_forecast_layers
+        else:
+            n_layers = self.detect_transformer.decoder.num_layers // 2
         all_bbox_preds_last = all_bbox_preds[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
         all_cls_scores_last = all_cls_scores[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
         _, _, losses_forecast_cls, losses_forecast = multi_apply(
