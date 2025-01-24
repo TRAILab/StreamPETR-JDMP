@@ -1690,9 +1690,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 num_dec_layer += 1
         
         # check loss dict has all keys
-        num_losses = 4*self.detect_transformer.decoder.num_layers
-        if hasattr(self, 'forecast_transformer'):
-            num_losses += 2*self.forecast_transformer.num_forecast_layers
+        num_losses = 4*self.detect_transformer.decoder.num_layers + 2*n_layers
         assert len(loss_dict) == num_losses, f"Expected {num_losses} losses, but got {len(loss_dict)}. Keys: {list(loss_dict.keys())}"
 
         return loss_dict
