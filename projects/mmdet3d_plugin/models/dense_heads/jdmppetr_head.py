@@ -1739,11 +1739,12 @@ class JDMPPETRHead(AnchorFreeHead):
             all_forecast_reference_points = all_forecast_reference_points[..., :2]
 
         # Topk forecast mode scores to save memory
-        max_num_modes = 6
-        if self.forecast_transformer.num_forecast_modes > max_num_modes:
-            all_forecast_scores, top_indices = torch.topk(all_forecast_scores.squeeze(-1), k=max_num_modes, dim=2)
-            top_indices_expanded = top_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, all_forecast_preds.size(3), all_forecast_preds.size(4))
-            all_forecast_preds = torch.gather(all_forecast_preds, 2, top_indices_expanded)
+        if hasattr(self, 'forecast_transformer'):
+            max_num_modes = 6
+            if self.forecast_transformer.num_forecast_modes > max_num_modes:
+                all_forecast_scores, top_indices = torch.topk(all_forecast_scores.squeeze(-1), k=max_num_modes, dim=2)
+                top_indices_expanded = top_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, all_forecast_preds.size(3), all_forecast_preds.size(4))
+                all_forecast_preds = torch.gather(all_forecast_preds, 2, top_indices_expanded)
 
         # Topk detection scores to match bbox decoder
         max_num_bbox = self.bbox_coder.max_num
