@@ -14,11 +14,8 @@ from mmdet.datasets import DATASETS
 from mmdet3d.datasets import NuScenesDataset
 from mmdet3d.core.bbox import LiDARInstance3DBoxes
 import torch
-from nuscenes import NuScenes
 from nuscenes.eval.common.utils import Quaternion
 from nuscenes.eval.prediction.data_classes import Prediction
-from nuscenes.eval.prediction.config import PredictionConfig
-from nuscenes.prediction import PredictHelper
 from mmcv.parallel import DataContainer as DC
 import random
 import math
@@ -41,6 +38,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.random_length = random_length
         self.num_frame_losses = num_frame_losses
         self.seq_mode = seq_mode
+        self.viz = False
         if seq_mode:
             self.num_frame_losses = 1
             self.queue_length = 1
@@ -302,20 +300,52 @@ class CustomNuScenesDataset(NuScenesDataset):
         #     results['forecast_results'][0]['pts_forecast']['trajs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['trajs_2d'].numel() +
         #     results['forecast_results'][0]['pts_forecast']['refs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['refs_2d'].numel() +
         #     results['forecast_results'][0]['pts_forecast']['scores_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['scores_2d'].numel())
+        from nuscenes import NuScenes
+        self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
         results_dict = dict()
         if 'forecast_results' in results:
             forecast_results = results['forecast_results']
             results = results['bbox_results']
-            preds, gts = self.forecast_format(forecast_results, jsonfile_prefix)
+            forecast_det_scores = [res['pts_bbox']['scores_3d'] for res in results]
+            preds, gts, for_gts = self.forecast_format(forecast_results, forecast_det_scores, jsonfile_prefix)
             num_forecasts = len(forecast_results[0]['pts_forecast']['trajs_2d'])
-            results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
 
-        if 'bbox' in metric:
-            results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+        if self.viz:
+            from projects.mmdet3d_plugin.datasets.nuscenes_viz import NuScenesVisualizer
+            from tqdm import tqdm
+            nuscViz = NuScenesVisualizer()
+            path = osp.join(jsonfile_prefix, 'pts_bbox', 'results_nusc.json')
+            with open(path, 'rb') as f:
+                predictions = json.load(f)['results']
+            path = osp.join(jsonfile_prefix, 'forecast', 'results_nusc_full.json')
+            with open(path, 'rb') as f:
+                for_preds_raw = json.load(f)
+            for_preds = {}
+            for_scores = {}
+            for pred in for_preds_raw:
+                if pred['sample'] not in for_preds:
+                    for_preds[pred['sample']] = [pred['prediction']]
+                    for_scores[pred['sample']] = [float(pred['instance'])]
+                else:
+                    for_preds[pred['sample']].append(pred['prediction'])
+                    for_scores[pred['sample']].append(float(pred['instance']))
+            for sample_id, (token, preds) in enumerate(tqdm(predictions.items(), desc="Rendering boxes")):
+                if token not in for_preds:
+                    print("No forecast for", token, "skipping")
+                    continue
+                file_name = f'{self.version[5:]}_{str(sample_id).zfill(5)}.png'
+                out_path = f'output/viz/forecast_eval/{file_name}'
+                nuscViz.render_boxes(self.nusc, token, preds, for_preds[token], for_scores[token], for_gts[token], out_path)
 
-        if 'bbox' not in metric and 'forecast' not in metric:
-            raise ValueError(f'Invalid metric type {metric}.')
-        
+        else:
+            if 'forecast' in metric:
+                results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
+            if 'bbox' in metric:
+                results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+            if 'bbox' not in metric and 'forecast' not in metric:
+                raise ValueError(f'Invalid metric type {metric}.')
+        del self.nusc
+
         return results_dict
 
     def format_results(self, results, jsonfile_prefix=None):
@@ -340,7 +370,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         result_files, tmp_dir = super().format_results(results, jsonfile_prefix)
         return result_files, tmp_dir
 
-    def forecast_format(self, forecast_results, jsonfile_prefix=None, match_threshold=1):
+    def forecast_format(self, forecast_results, forecast_det_scores, jsonfile_prefix=None, match_threshold=1):
         """Format the forecast results to json.
 
         Args:
@@ -350,9 +380,9 @@ class CustomNuScenesDataset(NuScenesDataset):
                 If not specified, a temp file will be created. Default: None.
         """
         print('\nFormatting forecasts')
-        export_full_preds = False
         preds = []
         preds_full = []
+        gts_full_dict = {}
         gts = []
         start_time = time.time()
         for sample_id, forecast in enumerate(forecast_results):
@@ -368,19 +398,25 @@ class CustomNuScenesDataset(NuScenesDataset):
             forecast_probs = forecast['pts_forecast']['scores_2d'].numpy()
             forecast_cur_positions = forecast['pts_forecast']['refs_2d'].numpy()
             forecast_pred_positions = forecast_pred_positions + forecast_cur_positions[:, None, None, :]
+            num_modes = forecast_pred_positions.shape[1]
 
-            # Get all predictions 
-            if export_full_preds:
-                num_modes = forecast_pred_positions.shape[1]
+            # Get all top predictions 
+            if self.viz:
+                gts_full_dict[sample_token] = gt
+                top_indices = np.argmax(forecast_probs, axis=1)  # Shape: (300,)
+                forecast_top_probs = np.max(forecast_probs, axis=1)  # Shape: (300,)
+                forecast_top_pred_positions = forecast_pred_positions[np.arange(300), top_indices][:, np.newaxis, :, :]  # Shape: (300, 1, 12, 2)
                 forecast_pred_positions_full = np.concatenate(
-                    (np.repeat(forecast_cur_positions[:, None, None, :], num_modes, 1), 
-                    forecast_pred_positions), axis=2)
+                    (forecast_cur_positions[:, None, None, :], 
+                    forecast_top_pred_positions), axis=2)
                 pred_ids = np.arange(len(forecast_pred_positions))
                 for pred_id in pred_ids:
-                    instance_token = '0' # Not needed
+                    instance_token = str(forecast_det_scores[sample_id][pred_id].item()) # store detections scores instead
                     sample_token = self.data_infos[sample_id]['token']
                     pred = forecast_pred_positions_full[pred_id]
-                    prob = forecast_probs[pred_id]
+                    prob = np.array([forecast_top_probs[pred_id]])
+                    if num_modes == 1:
+                        prob = prob[0]
                     preds_full.append(Prediction(instance_token, sample_token, pred, prob).serialize())
 
             # Match forecast to gt
@@ -402,6 +438,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                 sample_token = self.data_infos[sample_id]['token']
                 pred = forecast_pred_positions[pred_id][:,gt_pred_mask]
                 prob = forecast_probs[pred_id]
+                if num_modes == 1:
+                    prob = prob[0]
                 preds.append(Prediction(instance_token, sample_token, pred, prob).serialize())
         print('Format time: ', round(time.time()-start_time,1), 's')
 
@@ -412,11 +450,11 @@ class CustomNuScenesDataset(NuScenesDataset):
             mmcv.mkdir_or_exist(jsonfile_prefix)
             path = osp.join(jsonfile_prefix, 'results_nusc.json')
             json.dump(preds, open(path, "w"), indent=2)
-            if export_full_preds:
+            if self.viz:
                 path = osp.join(jsonfile_prefix, 'results_nusc_full.json')
-                json.dump(preds, open(path, "w"), indent=2)
+                json.dump(preds_full, open(path, "w"), indent=2)
 
-        return preds, gts
+        return preds, gts, gts_full_dict
 
     def forecast_evaluate(self, preds, gts, jsonfile_prefix=None, num_forecasts=300):
         """Evaluation for a single forecast model in nuScenes protocol.
@@ -433,10 +471,11 @@ class CustomNuScenesDataset(NuScenesDataset):
             dict: Dictionary of evaluation details.
         """
         print("Evaluating forecast")
+        from nuscenes.eval.prediction.config import PredictionConfig
+        from nuscenes.prediction import PredictHelper
         start_time = time.time()
         config_name = 'predict_eval.json'
-        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
-        helper = PredictHelper(nusc)
+        helper = PredictHelper(self.nusc)
         this_dir = osp.dirname(osp.abspath(__file__))
         cfg_path = osp.join(this_dir, config_name)
         assert osp.exists(cfg_path), f'Requested unknown configuration {cfg_path}'
@@ -504,18 +543,15 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        from nuscenes import NuScenes
         from nuscenes.eval.detection.evaluate import NuScenesEval
 
         output_dir = osp.join(*osp.split(result_path)[:-1])
-        nusc = NuScenes(
-            version=self.version, dataroot=self.data_root, verbose=False)
         eval_set_map = {
-            'v1.0-mini': 'mini_val',
+            'v1.0-mini': 'mini_train', # switched from val to train
             'v1.0-trainval': 'val',
         }
         nusc_eval = NuScenesEval(
-            nusc,
+            self.nusc,
             config=self.eval_detection_configs,
             result_path=result_path,
             eval_set=eval_set_map[self.version],
@@ -538,64 +574,6 @@ class CustomNuScenesDataset(NuScenesDataset):
                 val = float('{:.4f}'.format(v))
                 detail['{}/{}'.format(metric_prefix,
                                       self.ErrNameMapping[k])] = val
-
-        detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
-        detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
-        return detail
-    
-    def _evaluate_single(self,
-                            result_path,
-                            logger=None,
-                            metric='bbox',
-                            result_name='pts_bbox'):
-        """Evaluation for a single model in nuScenes protocol.
-
-        Args:
-            result_path (str): Path of the result file.
-            logger (logging.Logger | str, optional): Logger used for printing
-                related information during evaluation. Default: None.
-            metric (str, optional): Metric name used for evaluation.
-                Default: 'bbox'.
-            result_name (str, optional): Result name in the metric prefix.
-                Default: 'pts_bbox'.
-
-        Returns:
-            dict: Dictionary of evaluation details.
-        """
-        from nuscenes import NuScenes
-        from nuscenes.eval.detection.evaluate import NuScenesEval
-
-        output_dir = osp.join(*osp.split(result_path)[:-1])
-        nusc = NuScenes(
-            version=self.version, dataroot=self.data_root, verbose=False)
-        eval_set_map = {
-            'v1.0-mini': 'mini_train', # switched from val to train
-            'v1.0-trainval': 'val',
-        }
-        nusc_eval = NuScenesEval(
-            nusc,
-            config=self.eval_detection_configs,
-            result_path=result_path,
-            eval_set=eval_set_map[self.version],
-            output_dir=output_dir,
-            verbose=False)
-        nusc_eval.main(render_curves=False)
-
-        # record metrics
-        metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
-        detail = dict()
-        metric_prefix = f'{result_name}_NuScenes'
-        for name in self.CLASSES:
-            for k, v in metrics['label_aps'][name].items():
-                val = float('{:.4f}'.format(v))
-                detail['{}/{}_AP_dist_{}'.format(metric_prefix, name, k)] = val
-            for k, v in metrics['label_tp_errors'][name].items():
-                val = float('{:.4f}'.format(v))
-                detail['{}/{}_{}'.format(metric_prefix, name, k)] = val
-            for k, v in metrics['tp_errors'].items():
-                val = float('{:.4f}'.format(v))
-                detail['{}/{}'.format(metric_prefix,
-                                        self.ErrNameMapping[k])] = val
 
         detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
