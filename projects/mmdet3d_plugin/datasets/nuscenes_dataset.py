@@ -303,6 +303,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         from nuscenes import NuScenes
         self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
         results_dict = dict()
+        
         if 'forecast_results' in results:
             forecast_results = results['forecast_results']
             results = results['bbox_results']
@@ -344,8 +345,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                 results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
             if 'bbox' not in metric and 'forecast' not in metric:
                 raise ValueError(f'Invalid metric type {metric}.')
+        
         del self.nusc
-
         return results_dict
 
     def format_results(self, results, jsonfile_prefix=None):
@@ -544,6 +545,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             dict: Dictionary of evaluation details.
         """
         from nuscenes.eval.detection.evaluate import NuScenesEval
+        # from projects.mmdet3d_plugin.datasets.nuscenes_detection_evaluate import NuScenesEval
 
         output_dir = osp.join(*osp.split(result_path)[:-1])
         eval_set_map = {
@@ -559,10 +561,12 @@ class CustomNuScenesDataset(NuScenesDataset):
             verbose=False)
         nusc_eval.main(render_curves=False)
 
-        # record metrics
+        # Record metrics
         metrics = mmcv.load(osp.join(output_dir, 'metrics_summary.json'))
         detail = dict()
         metric_prefix = f'{result_name}_NuScenes'
+        
+        # Original per-class metrics
         for name in self.CLASSES:
             for k, v in metrics['label_aps'][name].items():
                 val = float('{:.4f}'.format(v))
@@ -575,8 +579,43 @@ class CustomNuScenesDataset(NuScenesDataset):
                 detail['{}/{}'.format(metric_prefix,
                                       self.ErrNameMapping[k])] = val
 
+        # Add distance-based metrics
+        for dist_range, dist_metrics in metrics['distance_metrics'].items():
+            for name in self.CLASSES:
+                if name in dist_metrics['label_aps']:
+                    for k, v in dist_metrics['label_aps'][name].items():
+                        val = float('{:.4f}'.format(v))
+                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, dist_range, k)] = val
+            # Add mean metrics for this distance range
+            detail['{}/mAP_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ap']))
+            detail['{}/mAR_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ar']))
+
+        # Add point-based metrics
+        for point_range, point_metrics in metrics['point_metrics'].items():
+            for name in self.CLASSES:
+                if name in point_metrics['label_aps']:
+                    for k, v in point_metrics['label_aps'][name].items():
+                        val = float('{:.4f}'.format(v))
+                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, point_range, k)] = val
+            # Add mean metrics for this point range
+            detail['{}/mAP_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ap']))
+            detail['{}/mAR_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ar']))
+
+        # Add visibility-based metrics
+        for vis_range, vis_metrics in metrics['visibility_metrics'].items():
+            for name in self.CLASSES:
+                if name in vis_metrics['label_aps']:
+                    for k, v in vis_metrics['label_aps'][name].items():
+                        val = float('{:.4f}'.format(v))
+                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, vis_range, k)] = val
+            # Add mean metrics for this visibility range
+            detail['{}/mAP_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ap']))
+            detail['{}/mAR_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ar']))
+
+        # Add overall metrics
         detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
+        
         return detail
 
 
