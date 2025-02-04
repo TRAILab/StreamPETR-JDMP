@@ -262,17 +262,55 @@ class CustomNuScenesDataset(NuScenesDataset):
                 continue
             return data
 
-    def evaluate(self,
-                 results,
-                 metric=['bbox', 'forecast'],
-                 logger=None,
-                 jsonfile_prefix=None,
-                 result_names=['pts_bbox'],
-                 show=False,
-                 out_dir=None,
-                 pipeline=None):
-        """Evaluation in nuScenes protocol.
+    def visualize_forecasts(self, jsonfile_prefix, gts_full_dict):
+        """Visualize detection and forecast results.
+        
+        Args:
+            jsonfile_prefix (str): Path prefix to the results json files
+            gts_full_dict (dict): Dictionary mapping sample tokens to ground truth trajectories
+        """
+        from projects.mmdet3d_plugin.datasets.nuscenes_viz import NuScenesVisualizer
+        from tqdm import tqdm
+        
+        # Initialize visualizer
+        nuscViz = NuScenesVisualizer()
+        
+        # Load detection results
+        path = osp.join(jsonfile_prefix, 'pts_bbox', 'results_nusc.json')
+        with open(path, 'rb') as f:
+            predictions = json.load(f)['results']
+            
+        # Load and process forecast results
+        path = osp.join(jsonfile_prefix, 'forecast', 'results_nusc_full.json')
+        with open(path, 'rb') as f:
+            for_preds_raw = json.load(f)
+            
+        # Organize forecasts by sample
+        for_preds = {}
+        for_scores = {}
+        for pred in for_preds_raw:
+            if pred['sample'] not in for_preds:
+                for_preds[pred['sample']] = [pred['prediction']]
+                for_scores[pred['sample']] = [float(pred['instance'])]
+            else:
+                for_preds[pred['sample']].append(pred['prediction'])
+                for_scores[pred['sample']].append(float(pred['instance']))
+                
+        # Render visualizations
+        for sample_id, (token, preds) in enumerate(tqdm(predictions.items(), desc="Rendering boxes")):
+            if token not in for_preds:
+                print("No forecast for", token, "skipping")
+                continue
+            file_name = f'{self.version[5:]}_{str(sample_id).zfill(5)}.png'
+            out_path = f'output/viz/forecast_eval/{file_name}'
+            nuscViz.render_boxes(self.nusc, token, preds, for_preds[token], 
+                               for_scores[token], gts_full_dict[token], out_path)
 
+    def evaluate(self, results, metric=['bbox', 'forecast'], logger=None,
+                jsonfile_prefix=None, result_names=['pts_bbox'], show=False,
+                out_dir=None, pipeline=None):
+        """Evaluation in nuScenes protocol.
+        
         Args:
             results (list[dict]): Testing results of the dataset.
             metric (str | list[str], optional): Metrics to be evaluated.
@@ -292,14 +330,6 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict[str, float]: Results of each evaluation metric.
         """
-        # bbox_memory_usage_gb = 1e-9*len(results['bbox_results'])*(
-        #     results['bbox_results'][0]['pts_bbox']['labels_3d'].element_size()*results['bbox_results'][0]['pts_bbox']['labels_3d'].numel() +
-        #     results['bbox_results'][0]['pts_bbox']['boxes_3d'].tensor.element_size()*results['bbox_results'][0]['pts_bbox']['boxes_3d'].tensor.numel() +
-        #     results['bbox_results'][0]['pts_bbox']['scores_3d'].element_size()*results['bbox_results'][0]['pts_bbox']['scores_3d'].numel())
-        # forecast_memory_usage_gb = 1e-9*len(results['forecast_results'])*(
-        #     results['forecast_results'][0]['pts_forecast']['trajs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['trajs_2d'].numel() +
-        #     results['forecast_results'][0]['pts_forecast']['refs_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['refs_2d'].numel() +
-        #     results['forecast_results'][0]['pts_forecast']['scores_2d'].element_size()*results['forecast_results'][0]['pts_forecast']['scores_2d'].numel())
         from nuscenes import NuScenes
         self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
         results_dict = dict()
@@ -312,32 +342,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             num_forecasts = len(forecast_results[0]['pts_forecast']['trajs_2d'])
 
         if self.viz:
-            from projects.mmdet3d_plugin.datasets.nuscenes_viz import NuScenesVisualizer
-            from tqdm import tqdm
-            nuscViz = NuScenesVisualizer()
-            path = osp.join(jsonfile_prefix, 'pts_bbox', 'results_nusc.json')
-            with open(path, 'rb') as f:
-                predictions = json.load(f)['results']
-            path = osp.join(jsonfile_prefix, 'forecast', 'results_nusc_full.json')
-            with open(path, 'rb') as f:
-                for_preds_raw = json.load(f)
-            for_preds = {}
-            for_scores = {}
-            for pred in for_preds_raw:
-                if pred['sample'] not in for_preds:
-                    for_preds[pred['sample']] = [pred['prediction']]
-                    for_scores[pred['sample']] = [float(pred['instance'])]
-                else:
-                    for_preds[pred['sample']].append(pred['prediction'])
-                    for_scores[pred['sample']].append(float(pred['instance']))
-            for sample_id, (token, preds) in enumerate(tqdm(predictions.items(), desc="Rendering boxes")):
-                if token not in for_preds:
-                    print("No forecast for", token, "skipping")
-                    continue
-                file_name = f'{self.version[5:]}_{str(sample_id).zfill(5)}.png'
-                out_path = f'output/viz/forecast_eval/{file_name}'
-                nuscViz.render_boxes(self.nusc, token, preds, for_preds[token], for_scores[token], for_gts[token], out_path)
-
+            self.visualize_forecasts(jsonfile_prefix, for_gts)
         else:
             if 'forecast' in metric:
                 results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
@@ -544,8 +549,11 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        from nuscenes.eval.detection.evaluate import NuScenesEval
-        # from projects.mmdet3d_plugin.datasets.nuscenes_detection_evaluate import NuScenesEval
+        extended_detection_eval = False
+        if extended_detection_eval:
+            from projects.mmdet3d_plugin.datasets.nuscenes_detection_evaluate import NuScenesEval
+        else:
+            from nuscenes.eval.detection.evaluate import NuScenesEval
 
         output_dir = osp.join(*osp.split(result_path)[:-1])
         eval_set_map = {
@@ -579,42 +587,42 @@ class CustomNuScenesDataset(NuScenesDataset):
                 detail['{}/{}'.format(metric_prefix,
                                       self.ErrNameMapping[k])] = val
 
-        # Add distance-based metrics
-        for dist_range, dist_metrics in metrics['distance_metrics'].items():
-            for name in self.CLASSES:
-                if name in dist_metrics['label_aps']:
-                    for k, v in dist_metrics['label_aps'][name].items():
-                        val = float('{:.4f}'.format(v))
-                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, dist_range, k)] = val
-            # Add mean metrics for this distance range
-            detail['{}/mAP_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ap']))
-            detail['{}/mAR_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ar']))
-
-        # Add point-based metrics
-        for point_range, point_metrics in metrics['point_metrics'].items():
-            for name in self.CLASSES:
-                if name in point_metrics['label_aps']:
-                    for k, v in point_metrics['label_aps'][name].items():
-                        val = float('{:.4f}'.format(v))
-                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, point_range, k)] = val
-            # Add mean metrics for this point range
-            detail['{}/mAP_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ap']))
-            detail['{}/mAR_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ar']))
-
-        # Add visibility-based metrics
-        for vis_range, vis_metrics in metrics['visibility_metrics'].items():
-            for name in self.CLASSES:
-                if name in vis_metrics['label_aps']:
-                    for k, v in vis_metrics['label_aps'][name].items():
-                        val = float('{:.4f}'.format(v))
-                        detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, vis_range, k)] = val
-            # Add mean metrics for this visibility range
-            detail['{}/mAP_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ap']))
-            detail['{}/mAR_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ar']))
-
-        # Add overall metrics
         detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
+
+        if extended_detection_eval:
+            # Add distance-based metrics
+            for dist_range, dist_metrics in metrics['distance_metrics'].items():
+                for name in self.CLASSES:
+                    if name in dist_metrics['label_aps']:
+                        for k, v in dist_metrics['label_aps'][name].items():
+                            val = float('{:.4f}'.format(v))
+                            detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, dist_range, k)] = val
+                # Add mean metrics for this distance range
+                detail['{}/mAP_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ap']))
+                detail['{}/mAR_{}'.format(metric_prefix, dist_range)] = float('{:.4f}'.format(dist_metrics['mean_ar']))
+
+            # Add point-based metrics
+            for point_range, point_metrics in metrics['point_metrics'].items():
+                for name in self.CLASSES:
+                    if name in point_metrics['label_aps']:
+                        for k, v in point_metrics['label_aps'][name].items():
+                            val = float('{:.4f}'.format(v))
+                            detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, point_range, k)] = val
+                # Add mean metrics for this point range
+                detail['{}/mAP_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ap']))
+                detail['{}/mAR_{}'.format(metric_prefix, point_range)] = float('{:.4f}'.format(point_metrics['mean_ar']))
+
+            # Add visibility-based metrics
+            for vis_range, vis_metrics in metrics['visibility_metrics'].items():
+                for name in self.CLASSES:
+                    if name in vis_metrics['label_aps']:
+                        for k, v in vis_metrics['label_aps'][name].items():
+                            val = float('{:.4f}'.format(v))
+                            detail['{}/{}_AP_{}_{}'.format(metric_prefix, name, vis_range, k)] = val
+                # Add mean metrics for this visibility range
+                detail['{}/mAP_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ap']))
+                detail['{}/mAR_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ar']))
         
         return detail
 
