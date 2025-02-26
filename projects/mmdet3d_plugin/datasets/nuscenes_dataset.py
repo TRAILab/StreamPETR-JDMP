@@ -7,7 +7,7 @@
 # Modified from mmdetection3d (https://github.com/open-mmlab/mmdetection3d)
 # Copyright (c) OpenMMLab. All rights reserved.
 # ------------------------------------------------------------------------
-#  Modified by Shihao Wang
+#  Modified by Sandro Papais
 # ------------------------------------------------------------------------
 import numpy as np
 from mmdet.datasets import DATASETS
@@ -23,6 +23,8 @@ import mmcv
 import os.path as osp
 import json
 import time
+import pyquaternion
+from nuscenes.utils.data_classes import Box as NuScenesBox
 
 @DATASETS.register_module()
 class CustomNuScenesDataset(NuScenesDataset):
@@ -38,7 +40,10 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.random_length = random_length
         self.num_frame_losses = num_frame_losses
         self.seq_mode = seq_mode
-        self.viz = False
+        self.viz = False # Visualize results
+        self.eval_detection_extended = False # Additional metrics for detection
+        self.eval_forecast_uniad = False # Additional metrics for forecast
+        self.forecast_match_threshold = 1 # Match threshold for forecast
         if seq_mode:
             self.num_frame_losses = 1
             self.queue_length = 1
@@ -332,22 +337,31 @@ class CustomNuScenesDataset(NuScenesDataset):
         """
         from nuscenes import NuScenes
         self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
-        results_dict = dict()
-        
-        if 'forecast_results' in results:
-            forecast_results = results['forecast_results']
-            results = results['bbox_results']
-            forecast_det_scores = [res['pts_bbox']['scores_3d'] for res in results]
-            preds, gts, for_gts = self.forecast_format(forecast_results, forecast_det_scores, jsonfile_prefix)
-            num_forecasts = len(forecast_results[0]['pts_forecast']['trajs_2d'])
 
-        if self.viz:
+        # Visualize or evaluate results
+        if self.viz and 'forecast_results' in results:
+            preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
             self.visualize_forecasts(jsonfile_prefix, for_gts)
         else:
-            if 'forecast' in metric:
+            results_dict = dict()
+            # Evaluate forecast metrics
+            if 'forecast_results' in results and 'forecast' in metric:
+                preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
+                num_forecasts = len(results['forecast_results'][0]['pts_forecast']['trajs_2d'])
                 results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
+                del preds, gts, for_gts
+                if self.eval_forecast_uniad:
+                    result_files, tmp_dir = self.forecast_format_uniad(results, jsonfile_prefix)
+                    results_dict.update(self.forecast_evaluate_uniad(result_files))
+                    if tmp_dir is not None:
+                        tmp_dir.cleanup()
+
+            # Evaluate detection metrics
             if 'bbox' in metric:
-                results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+                start_time = time.time()
+                results_dict.update(super().evaluate(results['bbox_results'], metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+                print('Format and eval time: ', round(time.time()-start_time,1), 's')
+            
             if 'bbox' not in metric and 'forecast' not in metric:
                 raise ValueError(f'Invalid metric type {metric}.')
         
@@ -376,7 +390,135 @@ class CustomNuScenesDataset(NuScenesDataset):
         result_files, tmp_dir = super().format_results(results, jsonfile_prefix)
         return result_files, tmp_dir
 
-    def forecast_format(self, forecast_results, forecast_det_scores, jsonfile_prefix=None, match_threshold=1):
+    def forecast_format_uniad(self, results, jsonfile_prefix=None):
+        """Format the results to json (standard format for COCO evaluation).
+
+        Args:
+            results (list[dict]): Testing results of the dataset.
+            jsonfile_prefix (str | None): The prefix of json files. It includes
+                the file path and the prefix of filename, e.g., "a/b/prefix".
+                If not specified, a temp file will be created. Default: None.
+
+        Returns:
+            tuple: Returns (result_files, tmp_dir), where `result_files` is a \
+                dict containing the json filepaths, `tmp_dir` is the temporal \
+                directory created for saving json files when \
+                `jsonfile_prefix` is not specified.
+        """
+        from nuscenes.prediction import convert_local_coords_to_global
+        import tempfile
+        import copy
+        print('\nFormatting forecast uniad')
+        start_time = time.time()
+
+        for k in results.keys():
+            assert isinstance(results[k], list), 'results must be a list'
+            assert len(results[k]) == len(self), (
+                'The length of results is not equal to the dataset len: {} != {}'.
+                format(len(results[k]), len(self)))
+
+        if jsonfile_prefix is None:
+            tmp_dir = tempfile.TemporaryDirectory()
+            jsonfile_prefix = osp.join(tmp_dir.name, 'results')
+        else:
+            tmp_dir = None
+
+        nusc_annos = {}
+        mapped_class_names = self.CLASSES
+
+        for sample_id, _ in enumerate(mmcv.track_iter_progress(results['forecast_results'])):
+            annos = []
+            sample_token = self.data_infos[sample_id]['token']
+            det = results['bbox_results'][sample_id]['pts_bbox']
+            pred = results['forecast_results'][sample_id]['pts_forecast']
+
+            if 'boxes_3d' not in det:
+                nusc_annos[sample_token] = annos
+                continue
+
+            boxes = output_to_nusc_box(det)
+            boxes_ego = copy.deepcopy(boxes)
+            boxes, keep_idx = lidar_nusc_box_to_global(self.data_infos[sample_id], boxes,
+                                                       mapped_class_names,
+                                                       self.eval_detection_configs,
+                                                       self.eval_version)
+            for i, box in enumerate(boxes):
+                name = mapped_class_names[box.label]
+                if np.sqrt(box.velocity[0]**2 + box.velocity[1]**2) > 0.2:
+                    if name in [
+                            'car',
+                            'construction_vehicle',
+                            'bus',
+                            'truck',
+                            'trailer',
+                    ]:
+                        attr = 'vehicle.moving'
+                    elif name in ['bicycle', 'motorcycle']:
+                        attr = 'cycle.with_rider'
+                    else:
+                        attr = NuScenesDataset.DefaultAttribute[name]
+                else:
+                    if name in ['pedestrian']:
+                        attr = 'pedestrian.standing'
+                    elif name in ['bus']:
+                        attr = 'vehicle.stopped'
+                    else:
+                        attr = NuScenesDataset.DefaultAttribute[name]
+
+                # center_ = box.center.tolist()
+                # change from ground height to center height
+                # center_[2] = center_[2] + (box.wlh.tolist()[2] / 2.0)
+                if name not in ['car', 'truck', 'bus', 'trailer', 'motorcycle',
+                                'bicycle', 'pedestrian', ]:
+                    continue
+
+                box_ego = boxes_ego[keep_idx[i]]
+                trans = box_ego.center
+
+                if 'trajs_2d' in pred:
+                    traj_local = pred['trajs_2d'][keep_idx[i]].numpy()[..., :2]
+                    traj_scores = pred['scores_2d'][keep_idx[i]].numpy()
+                else:
+                    traj_local = np.zeros((0,))
+                    traj_scores = np.zeros((0,))
+                traj_ego = np.zeros_like(traj_local)
+                rot = Quaternion(axis=np.array([0, 0.0, 1.0]), angle=np.pi/2)
+                for kk in range(traj_ego.shape[0]):
+                    traj_ego[kk] = convert_local_coords_to_global(
+                        traj_local[kk], trans, rot)
+
+                nusc_anno = dict(
+                    sample_token=sample_token,
+                    translation=box.center.tolist(),
+                    size=box.wlh.tolist(),
+                    rotation=box.orientation.elements.tolist(),
+                    velocity=box.velocity[:2].tolist(),
+                    detection_name=name,
+                    detection_score=box.score,
+                    attribute_name=attr,
+                    tracking_name=name,
+                    tracking_score=box.score,
+                    tracking_id=box.token,
+                    predict_traj=traj_ego,
+                    predict_traj_score=traj_scores,
+                )
+                annos.append(nusc_anno)
+            nusc_annos[sample_token] = annos
+        nusc_submissions = {
+            'meta': self.modality,
+            'results': nusc_annos
+        }
+
+        jsonfile_prefix = osp.join(jsonfile_prefix,'forecast_uniad')
+        mmcv.mkdir_or_exist(jsonfile_prefix)
+        res_path = osp.join(jsonfile_prefix, 'results_nusc.json')
+        print('Forecast results writes to', res_path)
+        mmcv.dump(nusc_submissions, res_path)
+        print('Format time: ', round(time.time()-start_time,1), 's')
+        return res_path, tmp_dir
+
+
+    def forecast_format(self, forecast_results, det_results, jsonfile_prefix=None):
         """Format the forecast results to json.
 
         Args:
@@ -399,7 +541,11 @@ class CustomNuScenesDataset(NuScenesDataset):
             gt = self.data_infos[sample_id]['gt_forecasting_locs'][:,:,:2]
             gt_cur_positions = gt[:,0]
             gt_pred_positions = gt[:,1:]
+
             # Get forecast positions
+            forecast_det_scores = det_results[sample_id]['pts_bbox']['scores_3d'].cpu().numpy()
+            labels = det_results[sample_id]['pts_bbox']['labels_3d'].cpu().numpy()
+            forecast_classes = [self.CLASSES[label] for label in labels]
             forecast_pred_positions = forecast['pts_forecast']['trajs_2d'].numpy()
             forecast_probs = forecast['pts_forecast']['scores_2d'].numpy()
             forecast_cur_positions = forecast['pts_forecast']['refs_2d'].numpy()
@@ -417,7 +563,7 @@ class CustomNuScenesDataset(NuScenesDataset):
                     forecast_top_pred_positions), axis=2)
                 pred_ids = np.arange(len(forecast_pred_positions))
                 for pred_id in pred_ids:
-                    instance_token = str(forecast_det_scores[sample_id][pred_id].item()) # store detections scores instead
+                    instance_token = str(forecast_det_scores[pred_id]) # store detections scores instead
                     sample_token = self.data_infos[sample_id]['token']
                     pred = forecast_pred_positions_full[pred_id]
                     prob = np.array([forecast_top_probs[pred_id]])
@@ -429,7 +575,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             delta = gt_cur_positions.reshape(-1,1,2) - forecast_cur_positions.reshape(1,-1,2)
             dist = np.sqrt(delta[:,:,0]**2 + delta[:,:,1]**2)
             min_gt_idx, min_dist = np.argmin(dist, axis=0), np.min(dist, axis=0)
-            match_true = min_dist < match_threshold
+            match_true = min_dist < self.forecast_match_threshold
             gt_ids = min_gt_idx[match_true]
             pred_ids = np.arange(len(forecast_pred_positions))[match_true]
 
@@ -440,14 +586,13 @@ class CustomNuScenesDataset(NuScenesDataset):
                     continue
                 gt = gt_pred_positions[gt_id][gt_pred_mask]
                 gts.append(gt.tolist())
-                instance_token = '0' # Not needed
+                instance_token = str(forecast_classes[pred_id]) # store classes instead
                 sample_token = self.data_infos[sample_id]['token']
                 pred = forecast_pred_positions[pred_id][:,gt_pred_mask]
                 prob = forecast_probs[pred_id]
                 if num_modes == 1:
                     prob = prob[0]
                 preds.append(Prediction(instance_token, sample_token, pred, prob).serialize())
-        print('Format time: ', round(time.time()-start_time,1), 's')
 
         # Write results to file
         if jsonfile_prefix is not None:
@@ -459,27 +604,104 @@ class CustomNuScenesDataset(NuScenesDataset):
             if self.viz:
                 path = osp.join(jsonfile_prefix, 'results_nusc_full.json')
                 json.dump(preds_full, open(path, "w"), indent=2)
+        print('Format time: ', round(time.time()-start_time,1), 's')    
 
         return preds, gts, gts_full_dict
+
+
+    def forecast_evaluate_uniad(self, result_path):
+        """Evaluation for a single model in nuScenes protocol.
+
+        Args:
+            result_path (str): Path of the result file.
+            logger (logging.Logger | str | None): Logger used for printing
+                related information during evaluation. Default: None.
+            metric (str): Metric name used for evaluation. Default: 'bbox'.
+            result_name (str): Result name in the metric prefix.
+                Default: 'pts_bbox'.
+
+        Returns:
+            dict: Dictionary of evaluation details.
+        """
+        from .nuscenes_eval_motion import MotionEval
+        print('Evaluating forecast uniad')
+        start_time = time.time()
+        output_dir = osp.join(*osp.split(result_path)[:-1])
+        output_dir_det = output_dir # TODO switch to bbox and forecast paths
+        output_dir_motion = output_dir 
+        mmcv.mkdir_or_exist(output_dir_det)
+        mmcv.mkdir_or_exist(output_dir_motion)
+
+        eval_set_map = {
+            'v1.0-mini': 'mini_train',
+            'v1.0-trainval': 'val',
+        }
+        self.nusc_eval_motion = MotionEval(
+            self.nusc,
+            config=self.eval_detection_configs,
+            result_path=result_path,
+            eval_set=eval_set_map[self.version],
+            output_dir=output_dir,
+            verbose=False,
+            overlap_test=False,
+            data_infos=self.data_infos,
+            category_convert_type='motion_category'
+        )
+
+        detail = dict()
+        metrics_summary = self.nusc_eval_motion.main(
+            plot_examples=0,
+            render_curves=False,
+            eval_mode='standard')
+        detail['forecast/MinADEU'] = metrics_summary['label_tp_errors']['car']['min_ade_err']
+        detail['forecast/MinFDEU'] = metrics_summary['label_tp_errors']['car']['min_fde_err']
+        detail['forecast/MissRateU'] = metrics_summary['label_tp_errors']['car']['miss_rate_err']
+        
+        metrics_summary = self.nusc_eval_motion.main(
+            plot_examples=0,
+            render_curves=False,
+            eval_mode='motion_map')
+        detail['forecast/mAPf'] = metrics_summary['mean_dist_aps']['car']
+
+        metrics_summary = self.nusc_eval_motion.main(
+            plot_examples=0,
+            render_curves=False,
+            eval_mode='epa')
+        detail['forecast/EPA'] = metrics_summary['label_tp_errors']['car']['epa']
+        
+        results_str = json.dumps(detail, indent=2)[2:-2].replace(" ", "").replace("\"", "").replace(":", ": ").replace("forecast/", "").replace(",", "")
+        print(results_str)
+        print('Eval time: ', round(time.time()-start_time,1), 's')
+
+        return detail
 
     def forecast_evaluate(self, preds, gts, jsonfile_prefix=None, num_forecasts=300):
         """Evaluation for a single forecast model in nuScenes protocol.
 
         Args:
-            forecast_results (list[dict]): Forecast testing results of the dataset.
             preds (list[dict]): List of prediction dictionaries.
             gts (list[list[list]]): List of ground truth trajectories (n_gt, n_times, n_states).
             jsonfile_prefix (str): The prefix of json files. It includes
                 the file path and the prefix of filename, e.g., "a/b/prefix".
                 If not specified, a temp file will be created. Default: None.
+            num_forecasts (int): Number of forecasts. Default: 300.
 
         Returns:
             dict: Dictionary of evaluation details.
         """
-        print("Evaluating forecast")
         from nuscenes.eval.prediction.config import PredictionConfig
         from nuscenes.prediction import PredictHelper
+
+        print("Evaluating forecast")
         start_time = time.time()
+        
+        # Setup
+        eval_class_sets = {'all': self.CLASSES, 
+            'vehicle': ['car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'motorcycle', 'bicycle'],
+            'static': ['barrier', 'traffic_cone'],
+            'pedestrian': ['pedestrian'],
+        }
+        
         config_name = 'predict_eval.json'
         helper = PredictHelper(self.nusc)
         this_dir = osp.dirname(osp.abspath(__file__))
@@ -487,38 +709,88 @@ class CustomNuScenesDataset(NuScenesDataset):
         assert osp.exists(cfg_path), f'Requested unknown configuration {cfg_path}'
         config = json.load(open(cfg_path, 'r'))
         config = PredictionConfig.deserialize(config, helper)
-
-        # Aggregate metrics
+        
+        # Create class set mapping for each prediction
+        pred_class_sets = {}
+        for i, pred_dict in enumerate(preds):
+            pred = Prediction.deserialize(pred_dict)
+            pred_class_sets[i] = []
+            for class_set_name, class_set in eval_class_sets.items():
+                if pred.instance in class_set:
+                    pred_class_sets[i].append(class_set_name)
+        
+        # Compute metrics for all predictions once
         n_preds = len(preds)
-        containers = {metric.name: np.zeros((n_preds, metric.shape)) for metric in config.metrics}
-        for i in range(n_preds):
-            pred = Prediction.deserialize(preds[i]) # [n_modes, n_timesteps, n_states]
-            gt = np.array(gts[i])  # [n_timesteps, n_states]
-            for forecast_metric in config.metrics:
-                containers[forecast_metric.name][i] = forecast_metric(gt, pred)
-
-        # Format results
-        results = {}
+        metric_results = {}
         for forecast_metric in config.metrics:
-            for agg in forecast_metric.aggregators:
-                if hasattr(forecast_metric, 'k_to_report'):
-                    for i, k in enumerate(forecast_metric.k_to_report):
-                        metric_name = 'forecast/'+forecast_metric.name.replace('K', str(k))
-                        results[metric_name] = agg(containers[forecast_metric.name])[i]
+            metric_results[forecast_metric.name] = np.zeros((n_preds, forecast_metric.shape))
+        
+        # Compute metrics for each prediction
+        for i, (pred_dict, gt_array) in enumerate(zip(preds, gts)):
+            pred = Prediction.deserialize(pred_dict)
+            gt = np.array(gt_array)
+            for forecast_metric in config.metrics:
+                metric_results[forecast_metric.name][i] = forecast_metric(gt, pred)
+        
+        # Aggregate results by class set
+        all_results = {}
+        for class_set_name, class_set in eval_class_sets.items():
+            # Get indices of predictions that belong to this class set
+            indices = [i for i, class_sets in pred_class_sets.items() if class_set_name in class_sets]
+            if not indices:
+                print(f"  No predictions found for {class_set_name} class set")
+                continue
+            
+            # Aggregate metrics for this class set
+            results = {}
+            for forecast_metric in config.metrics:
+                metric_name_prefix = f'forecast/{class_set_name}'
+                class_set_results = metric_results[forecast_metric.name][indices]
+                
+                for agg in forecast_metric.aggregators:
+                    if hasattr(forecast_metric, 'k_to_report'):
+                        for i, k in enumerate(forecast_metric.k_to_report):
+                            metric_name = f'{metric_name_prefix}/{forecast_metric.name.replace("K", str(k))}'
+                            results[metric_name] = agg(class_set_results)[i]
+                    else:
+                        metric_name = f'{metric_name_prefix}/{forecast_metric.name}'
+                        results[metric_name] = agg(class_set_results)[0]
+            
+            num_matches_avg = len(indices) / len(self.data_infos)
+            results[f'{metric_name_prefix}/AvgMatchRate_2'] = num_matches_avg / num_forecasts
+            
+            for result in results:
+                results[result] = round(results[result], 4)
+            all_results.update(results)
+        
+        # Format results for table
+        all_metrics = set()
+        class_sets_with_results = set()
+        for key in all_results.keys():
+            parts = key.split('/')
+            class_set_name = parts[1]
+            metric_name = parts[2]
+            all_metrics.add(metric_name)
+            class_sets_with_results.add(class_set_name)
+        all_metrics = sorted(list(all_metrics))
+        class_sets_with_results = sorted(list(class_sets_with_results))
+        
+        # Print table rows
+        header = "Metric".ljust(20)
+        for class_set in class_sets_with_results:
+            header += class_set.ljust(15)
+        print(header)
+        print("-" * (20 + 15 * len(class_sets_with_results)))
+        for metric in all_metrics:
+            row = metric.ljust(20)
+            for class_set in class_sets_with_results:
+                key = f"forecast/{class_set}/{metric}"
+                if key in all_results:
+                    row += f"{all_results[key]:.4f}".ljust(15)
                 else:
-                    metric_name = 'forecast/'+forecast_metric.name
-                    results[metric_name] = agg(containers[forecast_metric.name])[0]
-        num_matches_avg = n_preds / len(self.data_infos)
-        results['forecast/AvgMatchRate_2'] = num_matches_avg / num_forecasts
-        for result in results:
-            results[result] = round(results[result], 4)
-
-        # Print results
-        results_str = json.dumps(results, indent=2)[2:-2]
-        results_str = results_str.replace(" ", "").replace("\"", "").replace(":", ": ").replace("forecast/", "").replace(",", "")
-        print(results_str)
-        print('Eval time: ', round(time.time()-start_time,1), 's')
-
+                    row += "N/A".ljust(15)
+            print(row)
+        
         # Write results to file
         if jsonfile_prefix is not None:
             jsonfile_prefix = osp.join(jsonfile_prefix,'forecast')
@@ -526,9 +798,11 @@ class CustomNuScenesDataset(NuScenesDataset):
             path = osp.join(jsonfile_prefix, 'results_nusc.json')
             json.dump(preds, open(path, "w"), indent=2)
             path = osp.join(jsonfile_prefix, 'metrics_summary.json')
-            json.dump(results, open(path, "w"), indent=2)
+            json.dump(all_results, open(path, "w"), indent=2)
         
-        return results
+        print(f'Eval time: {time.time() - start_time:.2f}s')
+
+        return all_results
 
     def _evaluate_single(self,
                          result_path,
@@ -549,9 +823,8 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        extended_detection_eval = False
-        if extended_detection_eval:
-            from projects.mmdet3d_plugin.datasets.nuscenes_detection_evaluate import NuScenesEval
+        if self.eval_detection_extended:
+            from projects.mmdet3d_plugin.datasets.nuscenes_eval_detection import NuScenesEval
         else:
             from nuscenes.eval.detection.evaluate import NuScenesEval
 
@@ -590,7 +863,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
 
-        if extended_detection_eval:
+        if self.eval_detection_extended:
             # Add distance-based metrics
             for dist_range, dist_metrics in metrics['distance_metrics'].items():
                 for name in self.CLASSES:
@@ -789,3 +1062,84 @@ def convert_egopose_to_matrix_numpy(rotation, translation):
     transformation_matrix[:3, 3] = translation
     transformation_matrix[3, 3] = 1.0
     return transformation_matrix
+
+def output_to_nusc_box(detection):
+    """Convert the output to the box class in the nuScenes.
+    Args:
+        detection (dict): Detection results.
+            - boxes_3d (:obj:`BaseInstance3DBoxes`): Detection bbox.
+            - scores_3d (torch.Tensor): Detection scores.
+            - labels_3d (torch.Tensor): Predicted box labels.
+    Returns:
+        list[:obj:`NuScenesBox`]: List of standard NuScenesBoxes.
+    """
+    box3d = detection['boxes_3d']
+    scores = detection['scores_3d'].numpy()
+    labels = detection['labels_3d'].numpy()
+    if 'track_ids' in detection:
+        ids = detection['track_ids'].numpy()
+    else:
+        ids = np.ones_like(labels)
+
+    box_gravity_center = box3d.gravity_center.numpy()
+    box_dims = box3d.dims.numpy()
+    box_yaw = box3d.yaw.numpy()
+    # TODO: check whether this is necessary
+    # with dir_offset & dir_limit in the head
+    box_yaw = -box_yaw - np.pi / 2
+
+    box_list = []
+    for i in range(len(box3d)):
+        quat = pyquaternion.Quaternion(axis=[0, 0, 1], radians=box_yaw[i])
+        velocity = (*box3d.tensor[i, 7:9], 0.0)
+        # velo_val = np.linalg.norm(box3d[i, 7:9])
+        # velo_ori = box3d[i, 6]
+        # velocity = (
+        # velo_val * np.cos(velo_ori), velo_val * np.sin(velo_ori), 0.0)
+        box = NuScenesBox(
+            box_gravity_center[i],
+            box_dims[i],
+            quat,
+            label=labels[i],
+            score=scores[i],
+            velocity=velocity)
+        box.token = ids[i]
+        box_list.append(box)
+    return box_list
+
+def lidar_nusc_box_to_global(info,
+                             boxes,
+                             classes,
+                             eval_configs,
+                             eval_version='detection_cvpr_2019'):
+    """Convert the box from ego to global coordinate.
+    Args:
+        info (dict): Info for a specific sample data, including the
+            calibration information.
+        boxes (list[:obj:`NuScenesBox`]): List of predicted NuScenesBoxes.
+        classes (list[str]): Mapped classes in the evaluation.
+        eval_configs (object): Evaluation configuration object.
+        eval_version (str, optional): Evaluation version.
+            Default: 'detection_cvpr_2019'
+    Returns:
+        list: List of standard NuScenesBoxes in the global
+            coordinate.
+    """
+    box_list = []
+    keep_idx = []
+    for i, box in enumerate(boxes):
+        # Move box to ego vehicle coord system
+        box.rotate(Quaternion(info['lidar2ego_rotation']))
+        box.translate(np.array(info['lidar2ego_translation']))
+        # filter det in ego.
+        cls_range_map = eval_configs.class_range
+        radius = np.linalg.norm(box.center[:2], 2)
+        det_range = cls_range_map[classes[box.label]]
+        if radius > det_range:
+            continue
+        # Move box to global coord system
+        box.rotate(Quaternion(info['ego2global_rotation']))
+        box.translate(np.array(info['ego2global_translation']))
+        box_list.append(box)
+        keep_idx.append(i)
+    return box_list, keep_idx
