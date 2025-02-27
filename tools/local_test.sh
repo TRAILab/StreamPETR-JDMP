@@ -6,6 +6,7 @@ NUM_GPUS=1
 CONFIG_NAME=jdmpvov_cvforecast_prop_bs8_1gpu_lre6
 # CONFIG_NAME=jdmpvov_mini_attforecast_noprop_bs4_1gpu_freezedet_lre4_20e
 DOCKER_IMG=spapais/streampetr:latest
+PORT=29500
 
 # Host paths
 HOME_DIR=/home/trail/workspace
@@ -34,7 +35,8 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 BASE_CMD="tools/dist_test.sh $CONFIG_FILE $MODEL_CKPT $NUM_GPUS --eval bbox --eval-options '$EVAL_OPT'"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
---env="WANDB_API_KEY=$WANDB_API_KEY"
+--env=\"WANDB_API_KEY=$WANDB_API_KEY\"
+--env=\"PORT=$PORT\"
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"
