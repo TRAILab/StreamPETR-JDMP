@@ -33,17 +33,18 @@ class CustomNuScenesDataset(NuScenesDataset):
     This datset only add camera intrinsics and extrinsics to the results.
     """
 
-    def __init__(self, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, *args, **kwargs):
+    def __init__(self, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, eval_mod=['detection'], *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.queue_length = queue_length
         self.collect_keys = collect_keys
         self.random_length = random_length
         self.num_frame_losses = num_frame_losses
         self.seq_mode = seq_mode
-        self.viz = False # Visualize results
-        self.eval_detection_extended = False # Additional metrics for detection
-        self.eval_forecast_uniad = False # Additional metrics for forecast
         self.forecast_match_threshold = 1 # Match threshold for forecast
+        self.eval_mod = eval_mod # Note: if 'viz' is in eval_mod, then no evaluations will be done
+        eval_mod_all = ['viz', 'detection', 'detection_ext', 'forecast', 'forecast_uniad']
+        for mod in self.eval_mod:
+            assert mod in eval_mod_all, f"Invalid evaluation metric: {mod}"
         if seq_mode:
             self.num_frame_losses = 1
             self.queue_length = 1
@@ -311,7 +312,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             nuscViz.render_boxes(self.nusc, token, preds, for_preds[token], 
                                for_scores[token], gts_full_dict[token], out_path)
 
-    def evaluate(self, results, metric=['bbox', 'forecast'], logger=None,
+    def evaluate(self, results, metric=['bbox'], logger=None,
                 jsonfile_prefix=None, result_names=['pts_bbox'], show=False,
                 out_dir=None, pipeline=None):
         """Evaluation in nuScenes protocol.
@@ -339,34 +340,32 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
 
         # Visualize or evaluate results
-        if self.viz and 'forecast_results' in results:
+        if 'viz' in self.eval_mod and 'forecast_results' in results:
             preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
             self.visualize_forecasts(jsonfile_prefix, for_gts)
         else:
             results_dict = dict()
             # Evaluate forecast metrics
-            if 'forecast_results' in results and 'forecast' in metric:
-                preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
-                num_forecasts = len(results['forecast_results'][0]['pts_forecast']['trajs_2d'])
-                results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
-                del preds, gts, for_gts
-                if self.eval_forecast_uniad:
+            if 'forecast_results' in results:
+                if 'forecast' in self.eval_mod:
+                    preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
+                    num_forecasts = len(results['forecast_results'][0]['pts_forecast']['trajs_2d'])
+                    results_dict.update(self.forecast_evaluate(preds, gts, jsonfile_prefix, num_forecasts))
+                    del preds, gts, for_gts
+                if 'forecast_uniad' in self.eval_mod:
                     result_files, tmp_dir = self.forecast_format_uniad(results, jsonfile_prefix)
                     results_dict.update(self.forecast_evaluate_uniad(result_files))
                     if tmp_dir is not None:
                         tmp_dir.cleanup()
 
             # Evaluate detection metrics
-            if 'bbox' in metric:
+            if 'detection' in self.eval_mod or 'detection_ext' in self.eval_mod:
                 if 'forecast_results' in results:
                     results = results['bbox_results']
                 start_time = time.time()
                 results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
                 print('Format and eval time: ', round(time.time()-start_time,1), 's')
-            
-            if 'bbox' not in metric and 'forecast' not in metric:
-                raise ValueError(f'Invalid metric type {metric}.')
-        
+                    
         del self.nusc
         return results_dict
 
@@ -555,7 +554,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             num_modes = forecast_pred_positions.shape[1]
 
             # Get all top predictions 
-            if self.viz:
+            if 'viz' in self.eval_mod:
                 gts_full_dict[sample_token] = gt
                 top_indices = np.argmax(forecast_probs, axis=1)  # Shape: (300,)
                 forecast_top_probs = np.max(forecast_probs, axis=1)  # Shape: (300,)
@@ -603,7 +602,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             mmcv.mkdir_or_exist(jsonfile_prefix)
             path = osp.join(jsonfile_prefix, 'results_nusc.json')
             json.dump(preds, open(path, "w"), indent=2)
-            if self.viz:
+            if 'viz' in self.eval_mod:
                 path = osp.join(jsonfile_prefix, 'results_nusc_full.json')
                 json.dump(preds_full, open(path, "w"), indent=2)
         print('Format time: ', round(time.time()-start_time,1), 's')    
@@ -825,7 +824,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        if self.eval_detection_extended:
+        if 'detection_ext' in self.eval_mod:
             from projects.mmdet3d_plugin.datasets.nuscenes_eval_detection import NuScenesEval
         else:
             from nuscenes.eval.detection.evaluate import NuScenesEval
@@ -865,7 +864,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         detail['{}/NDS'.format(metric_prefix)] = metrics['nd_score']
         detail['{}/mAP'.format(metric_prefix)] = metrics['mean_ap']
 
-        if self.eval_detection_extended:
+        if 'detection_ext' in self.eval_mod:
             # Add distance-based metrics
             for dist_range, dist_metrics in metrics['distance_metrics'].items():
                 for name in self.CLASSES:
@@ -909,8 +908,8 @@ class JDMPCustomNuScenesDataset(CustomNuScenesDataset):
     This datset only add camera intrinsics and extrinsics to the results.
     """
 
-    def __init__(self, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, *args, **kwargs):
-        super().__init__(collect_keys, seq_mode, seq_split_num, num_frame_losses, queue_length, random_length, *args, **kwargs)
+    def __init__(self, collect_keys, seq_mode=False, seq_split_num=1, num_frame_losses=1, queue_length=8, random_length=0, eval_mod=['detection', 'forecast'], *args, **kwargs):
+        super().__init__(collect_keys, seq_mode, seq_split_num, num_frame_losses, queue_length, random_length, eval_mod, *args, **kwargs)
 
     def union2one(self, queue):
         for key in self.collect_keys:
