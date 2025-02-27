@@ -1073,7 +1073,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
             else:
                 rec_reference_points = all_bbox_preds[..., :3]
-            all_forecast_preds = torch.zeros((N, B, rec_reference_points.shape[2], 1, num_future_frames + 1, 2), device=rec_reference_points.device)
+            all_forecast_preds = torch.zeros((N, B, rec_reference_points.shape[2], 1, num_future_frames, 2), device=rec_reference_points.device)
             all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
             detection_reference_point = rec_reference_points[-1]
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
