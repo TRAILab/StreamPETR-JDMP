@@ -358,8 +358,10 @@ class CustomNuScenesDataset(NuScenesDataset):
 
             # Evaluate detection metrics
             if 'bbox' in metric:
+                if 'forecast_results' in results:
+                    results = results['bbox_results']
                 start_time = time.time()
-                results_dict.update(super().evaluate(results['bbox_results'], metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+                results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
                 print('Format and eval time: ', round(time.time()-start_time,1), 's')
             
             if 'bbox' not in metric and 'forecast' not in metric:
