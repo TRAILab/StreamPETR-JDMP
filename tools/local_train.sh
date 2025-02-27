@@ -3,8 +3,10 @@
 # Parameters
 GPUS=0
 NUM_GPUS=1
-CONFIG_NAME=jdmp_mini_attforecast_prop_bs8_1gpu_finetunedet_60e
+# CONFIG_NAME=jdmp_mini_cvforecast_noprop_bs2_1gpu
+CONFIG_NAME=jdmp_r50_mini_bs8_1gpu
 DOCKER_IMG=spapais/streampetr:latest
+PORT=29500
 
 # Host paths
 HOME_DIR=/home/trail/workspace
@@ -17,7 +19,7 @@ CONFIG_DIR=/proj/projects/configs/StreamPETR
 CONFIG_FILE=$CONFIG_DIR/$CONFIG_NAME.py
 MODEL_CKPT=/proj/output/$CONFIG_NAME/$CONFIG_NAME.pth
 WRK_DIR=/proj/output/$CONFIG_NAME
-CFG_OPT=model.pts_bbox_head.viz_forecast_loss=True
+# CFG_OPT=model.pts_bbox_head.viz_forecast_loss=True
 
 VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/samples:/proj/data/nuscenes/samples
@@ -29,10 +31,11 @@ VOLUMES="-v $PROJ_DIR/:/proj/
 -v $DATA_DIR/sweeps:/proj/data/nuscenes/sweeps
 -v $OUTPUT_DIR:/proj/output/"
 
-BASE_CMD="tools/dist_train.sh $CONFIG_FILE $NUM_GPUS --work-dir $WRK_DIR --cfg-options '$CFG_OPT'"
+BASE_CMD="tools/dist_train.sh $CONFIG_FILE $NUM_GPUS --work-dir $WRK_DIR" # --cfg-options '$CFG_OPT'"
 
 CONTAINER_CMD="docker run -it --ipc host --gpus $GPUS -w /proj/
---env="WANDB_API_KEY=$WANDB_API_KEY"
+--env=\"WANDB_API_KEY=$WANDB_API_KEY\"
+--env=\"PORT=$PORT\"
 $VOLUMES
 $DOCKER_IMG
 $BASE_CMD"
