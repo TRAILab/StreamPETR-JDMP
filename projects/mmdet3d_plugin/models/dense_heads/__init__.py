@@ -3,4 +3,5 @@ from .petr_head_dn import PETRHeadDN
 from .streampetr_head import StreamPETRHead
 from .jdmppetr_head import JDMPPETRHead
 from .sparse_head import SparseHead
+from .jdmpsparse_head import JDMPSparseHead
 from .yolox_head import YOLOXHeadCustom
