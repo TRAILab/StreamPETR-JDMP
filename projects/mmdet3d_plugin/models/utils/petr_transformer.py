@@ -896,9 +896,17 @@ class JDMPForecastTransformer(BaseModule):
 
         anchor_infos = pickle.load(open('ckpts/motion_anchor_infos_mode6.pkl', 'rb'))
         self.kmeans_anchors = torch.stack(
-            [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float()
-        self.kmeans_anchors = self.kmeans_anchors[:3].reshape(-1, 12, 2)
-        self.num_forecast_modes = self.kmeans_anchors.size(0)
+            [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float() # G, M, 12, 2
+        self.num_forecast_modes = self.kmeans_anchors.size(1)
+        self.num_forecast_groups = self.kmeans_anchors.size(0)
+
+        group_id_list = [[0,1,2,3,4], [6,7], [8], [5,9]] # TODO: move to config
+        num_classes = 10 # TODO: move to config
+        self.cls2group = [0 for i in range(num_classes)]
+        for i, grouped_ids in enumerate(group_id_list):
+            for gid in grouped_ids:
+                self.cls2group[gid] = i
+        self.cls2group = torch.tensor(self.cls2group)
 
         self._init_layers()
 
@@ -923,7 +931,7 @@ class JDMPForecastTransformer(BaseModule):
         self.traj_reg_branches = nn.ModuleList([copy.deepcopy(traj_reg_branch) for i in range(self.num_forecast_layers)])
 
         self.learnable_motion_query_embedding = nn.Embedding(
-            self.num_forecast_modes, self.embed_dims)
+            self.num_forecast_groups*self.num_forecast_modes, self.embed_dims)
 
         self.forecast_det_query_embedding = nn.Sequential(
             nn.Linear(self.embed_dims*2, self.embed_dims),
@@ -1009,7 +1017,7 @@ class JDMPForecastTransformer(BaseModule):
         #         xavier_init(m, distribution='uniform')
         self._is_init = True
 
-    def forward(self, detection_query, detection_reference_pose, map_query=None, map_reference_pos=None):
+    def forward(self, detection_query, detection_reference_pose, detection_reference_label, map_query=None, map_reference_pos=None):
         B = detection_query.size(0)
         A = self.num_propagated
         M = self.num_forecast_modes
@@ -1025,23 +1033,33 @@ class JDMPForecastTransformer(BaseModule):
         detection_reference_point_norm = self.norm_points_2d(detection_reference_point)
         detection_query_pos = self.forecast_det_query_embedding(pos2posemb2d(detection_reference_point_norm))
 
-        agent_level_anchors = self.kmeans_anchors.to(detection_reference_point.device).detach() # M, 12, 2
-        scene_level_ego_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose) # B, A, M, 12, 2
+        agent_level_anchors = self.kmeans_anchors.to(detection_reference_point.device).detach() # G, M, 12, 2
+        scene_level_ego_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose) # B, A, G, M, 12, 2
         scene_level_offset_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose, with_translation_transform=False)  
         
-        agent_level_norm = self.norm_points_2d(agent_level_anchors) # M, 12, 2
-        scene_level_ego_norm = self.norm_points_2d(scene_level_ego_anchors) # B, A, M, 12, 2
+        agent_level_norm = self.norm_points_2d(agent_level_anchors) # G, M, 12, 2
+        scene_level_ego_norm = self.norm_points_2d(scene_level_ego_anchors) # B, A, G, M, 12, 2
         scene_level_offset_norm = self.norm_points_2d(scene_level_offset_anchors)
 
-        agent_level_embedding = self.forecast_agent_level_embedding(pos2posemb2d(agent_level_norm[..., -1, :]))  # M, C
-        scene_level_ego_embedding = self.forecast_scene_level_ego_embedding(pos2posemb2d(scene_level_ego_norm[..., -1, :])) # B, A, M, C
+        agent_level_embedding = self.forecast_agent_level_embedding(pos2posemb2d(agent_level_norm[..., -1, :]))  # G, M, C
+        scene_level_ego_embedding = self.forecast_scene_level_ego_embedding(pos2posemb2d(scene_level_ego_norm[..., -1, :])) # B, A, G, M, C
         scene_level_offset_embedding = self.forecast_scene_level_offset_embedding(pos2posemb2d(scene_level_offset_norm[..., -1, :])) 
 
-        agent_level_embedding = agent_level_embedding[None,None, ...].expand(B, A, -1, -1) # B, A, M, C
-        learnable_query_pos = self.learnable_motion_query_embedding.weight.to(detection_query.device) # M, C
-        learnable_embed = learnable_query_pos[None, None, ...].expand(B, A, -1, -1) # B, A, M, C
+        agent_level_embedding = agent_level_embedding[None,None, ...].expand(B, A, -1, -1, -1) # B, A, G, M, C
+        learnable_query_pos = self.learnable_motion_query_embedding.weight.to(detection_query.device) # G*M, C
+        learnable_query_pos = torch.stack(torch.split(learnable_query_pos, self.num_forecast_modes, dim=0)) # G, M, C
+        learnable_embed = learnable_query_pos[None, None, ...].expand(B, A, -1, -1, -1) # B, A, G, M, C
 
-        init_reference  = scene_level_offset_anchors
+        # select class anchor
+        # B, A, G, M, 12, 2 -> B, A, M, 12 ,2
+        scene_level_offset_anchors = self.group_mode_query(detection_reference_label, scene_level_offset_anchors)  
+        # B, A, G, P, D-> B, A, P, D
+        agent_level_embedding = self.group_mode_query(detection_reference_label, agent_level_embedding)  
+        scene_level_ego_embedding = self.group_mode_query(detection_reference_label, scene_level_ego_embedding)
+        scene_level_offset_embedding = self.group_mode_query(detection_reference_label, scene_level_offset_embedding)
+        learnable_embed = self.group_mode_query(detection_reference_label, learnable_embed)
+
+        init_reference  = scene_level_offset_anchors.detach()
 
         detection_query_bc = detection_query.unsqueeze(2).expand(-1, -1, M, -1)  # B, A, M, C
         detection_query_pos_bc = detection_query_pos.unsqueeze(2).expand(-1, -1, M, -1)  # B, A, M, C
@@ -1149,15 +1167,15 @@ class JDMPForecastTransformer(BaseModule):
         #     velo_dir = torch.atan2(velo[..., 1], velo[..., 0])
         #     velo_mag = torch.norm(velo[..., :2], dim=-1)
         #     ref_poses_vec[..., 2] = torch.where(velo_mag > velo_mag_thresh, velo_dir, ref_poses_vec[..., 2])
-        ref_poses_vec[..., 2] -= torch.tensor(math.pi)/2 
-        ref_poses_mat = self.pose2d_vec_to_mat(ref_poses_vec).unsqueeze(2).unsqueeze(2) # B, A, M, T, 3, 3
+        ref_poses_vec[..., 2] -= torch.tensor(math.pi)/2 # B, A, 3
+        ref_poses_mat = self.pose2d_vec_to_mat(ref_poses_vec).unsqueeze(2).unsqueeze(2).unsqueeze(2) # B, A, G, M, T, 3, 3
         if not with_translation_transform:
             ref_poses_mat[..., :2, 2] = 0.0
         if not with_rotation_transform:
             ref_poses_mat[..., :2, :2] = torch.eye(2)
-        transformed_anchors = anchors[None, None, ...] # B, A, M, T, 2
-        transformed_anchors = torch.cat([transformed_anchors, torch.ones_like(transformed_anchors[..., :1])], dim=-1) # B, A, M, T, 3
-        transformed_anchors = torch.matmul(ref_poses_mat, transformed_anchors.unsqueeze(-1)).squeeze(-1) # B, A, M, T, 3
+        transformed_anchors = anchors[None, None, ...] # B, A, G, M, T, 2
+        transformed_anchors = torch.cat([transformed_anchors, torch.ones_like(transformed_anchors[..., :1])], dim=-1) # B, A, G, M, T, 3
+        transformed_anchors = torch.matmul(ref_poses_mat, transformed_anchors.unsqueeze(-1)).squeeze(-1) # B, A, G, M, T, 3
         transformed_anchors = transformed_anchors[..., :2]
         # viz
         # import matplotlib.pyplot as plt
@@ -1261,3 +1279,27 @@ class JDMPForecastTransformer(BaseModule):
         pose2d_mat[..., 1, 1] = torch.cos(pose2d_vec[..., 2])
         pose2d_mat[..., 0:2, 2] = pose2d_vec[..., 0:2]
         return pose2d_mat
+    
+    def group_mode_query(self, detection_reference_label, mode_query):
+        """
+        Group mode query based on the input bounding box results.
+        
+        Args:
+            detection_reference_label (torch.Tensor): A tensor of shape (B, A, 1) representing the detection reference label.
+            mode_query (torch.Tensor): A tensor of shape (B, A, G, ...) representing the mode query.
+        
+        Returns:
+            torch.Tensor: A tensor of shape (B, A, ...) representing the classified mode query.
+        """
+        # B, A, G,... -> B, A,...
+        B = mode_query.shape[0]
+        A = mode_query.shape[1]
+        assert detection_reference_label.shape == (B, A, 1)
+        self.cls2group = self.cls2group.to(mode_query.device)
+        cls_ids = detection_reference_label.long().squeeze(-1)  # B, A
+        group_ids = self.cls2group[cls_ids]  # B, A
+        batch_indices = torch.arange(B, device=mode_query.device).view(B, 1).expand(B, A)
+        agent_indices = torch.arange(A, device=mode_query.device).view(1, A).expand(B, A)
+        batched_mode_query = mode_query[batch_indices, agent_indices, group_ids]
+        return batched_mode_query
+    
