@@ -395,6 +395,7 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
             self.memory_velo = x.new_zeros(B, self.memory_len, 2)
             self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
+            self.memory_label = x.new_zeros(B, self.memory_len, 1)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
             if self.with_attn_forecast and self.forecast_mem_update:
@@ -411,7 +412,7 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
             self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
-        
+            self.memory_label = memory_refresh(self.memory_label[:, :self.memory_len], x)
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
             pseudo_reference_points = self.pseudo_reference_points.weight * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3]
@@ -428,6 +429,7 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
             rec_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
             rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
+            rec_label = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
         else:
             rec_reference_points = all_bbox_preds[..., :3][-1]
             rec_velo = all_bbox_preds[..., -2:][-1]
@@ -437,7 +439,7 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_rot_sine = all_bbox_preds[..., 6:7][-1]
             rec_rot_cosine = all_bbox_preds[..., 7:8][-1]
             rec_rotation = torch.atan2(rec_rot_sine, rec_rot_cosine)
-        
+            rec_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
         # topk proposals
         _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=1)
         rec_timestamp = topk_gather(rec_timestamp, topk_indexes)
@@ -446,7 +448,8 @@ class JDMPPETRHead(AnchorFreeHead):
         rec_ego_pose = topk_gather(rec_ego_pose, topk_indexes)
         rec_velo = topk_gather(rec_velo, topk_indexes).detach()
         rec_rotation = topk_gather(rec_rotation, topk_indexes).detach()
-
+        rec_label = topk_gather(rec_label, topk_indexes).detach()
+        
         self.memory_embedding = torch.cat([rec_memory, self.memory_embedding], dim=1)
         self.memory_timestamp = torch.cat([rec_timestamp, self.memory_timestamp], dim=1)
         self.memory_egopose= torch.cat([rec_ego_pose, self.memory_egopose], dim=1)
@@ -459,6 +462,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose'])
         if self.memory_vel_transform:
             self.memory_velo = transform_velocity(self.memory_velo, data['ego_pose'])
+        self.memory_label = torch.cat([rec_label, self.memory_label], dim=1)
 
     def position_embeding(self, data, memory_centers, topk_indexes, img_metas):
         eps = 1e-5
@@ -985,6 +989,7 @@ class JDMPPETRHead(AnchorFreeHead):
                     detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
                     detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
                     detection_reference_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                    detection_reference_label = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
                     detection_reference_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
                     detection_reference_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
                     detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
@@ -992,12 +997,14 @@ class JDMPPETRHead(AnchorFreeHead):
                     detection_reference_point = all_bbox_preds[..., :3][-1]
                     detection_query = outs_dec[-1]
                     detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                    detection_reference_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
                     detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
                     detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
                     detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
                 _, topk_indexes = torch.topk(detection_reference_score, self.topk_proposals, dim=1)
             else:
                 detection_query = self.memory_embedding[:, :self.num_propagated]
+                detection_reference_label = self.memory_label[:, :self.num_propagated]
                 memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
                 detection_reference_point = memory_reference_point[:, :self.num_propagated]
                 detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
@@ -1007,9 +1014,9 @@ class JDMPPETRHead(AnchorFreeHead):
                 detection_reference_rotation_global = transform_rotations(detection_reference_rotation, data['ego_pose'])
                 sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
                 map_query, map_reference_pos = self.map_encoding(sample_idx, data['ego_pose'], detection_reference_point_global, detection_reference_rotation_global)
-                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, map_query, map_reference_pos)
+                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, detection_reference_label, map_query, map_reference_pos)
             else:
-                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose)
+                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, detection_reference_label)
             # Prepare for forecasting
             # forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
             #     forecast_temp_pos = self.forecast_alignment(data)
@@ -1741,7 +1748,7 @@ class JDMPPETRHead(AnchorFreeHead):
             return None 
         all_forecast_preds = preds_dicts['all_forecast_preds'][-1].cpu()
         all_forecast_reference_points = preds_dicts['all_forecast_reference_points'].cpu()
-        all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu()
+        all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu().squeeze(-1)
         if all_forecast_preds.shape[-1] == 3:
             all_forecast_preds = all_forecast_preds[..., :2]
         if all_forecast_reference_points.shape[-1] == 3:
@@ -1751,7 +1758,7 @@ class JDMPPETRHead(AnchorFreeHead):
         if hasattr(self, 'forecast_transformer'):
             max_num_modes = 6
             if self.forecast_transformer.num_forecast_modes > max_num_modes:
-                all_forecast_scores, top_indices = torch.topk(all_forecast_scores.squeeze(-1), k=max_num_modes, dim=2)
+                all_forecast_scores, top_indices = torch.topk(all_forecast_scores, k=max_num_modes, dim=2)
                 top_indices_expanded = top_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, all_forecast_preds.size(3), all_forecast_preds.size(4))
                 all_forecast_preds = torch.gather(all_forecast_preds, 2, top_indices_expanded)
 
