@@ -1748,7 +1748,7 @@ class JDMPPETRHead(AnchorFreeHead):
             return None 
         all_forecast_preds = preds_dicts['all_forecast_preds'][-1].cpu()
         all_forecast_reference_points = preds_dicts['all_forecast_reference_points'].cpu()
-        all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu()
+        all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu().squeeze(-1)
         if all_forecast_preds.shape[-1] == 3:
             all_forecast_preds = all_forecast_preds[..., :2]
         if all_forecast_reference_points.shape[-1] == 3:
@@ -1758,7 +1758,7 @@ class JDMPPETRHead(AnchorFreeHead):
         if hasattr(self, 'forecast_transformer'):
             max_num_modes = 6
             if self.forecast_transformer.num_forecast_modes > max_num_modes:
-                all_forecast_scores, top_indices = torch.topk(all_forecast_scores.squeeze(-1), k=max_num_modes, dim=2)
+                all_forecast_scores, top_indices = torch.topk(all_forecast_scores, k=max_num_modes, dim=2)
                 top_indices_expanded = top_indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, all_forecast_preds.size(3), all_forecast_preds.size(4))
                 all_forecast_preds = torch.gather(all_forecast_preds, 2, top_indices_expanded)
 

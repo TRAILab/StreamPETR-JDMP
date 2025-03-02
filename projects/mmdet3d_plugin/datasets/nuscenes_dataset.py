@@ -591,8 +591,6 @@ class CustomNuScenesDataset(NuScenesDataset):
                 sample_token = self.data_infos[sample_id]['token']
                 pred = forecast_pred_positions[pred_id][:,gt_pred_mask]
                 prob = forecast_probs[pred_id]
-                if len(prob.shape) == 2:
-                    prob = prob[:,0]
                 if num_modes == 1:
                     prob = prob[0]
                 preds.append(Prediction(instance_token, sample_token, pred, prob).serialize())
