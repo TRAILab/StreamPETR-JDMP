@@ -885,7 +885,7 @@ class JDMPTemporalTransformer(BaseModule):
 
 @TRANSFORMER.register_module()
 class JDMPForecastTransformer(BaseModule):
-    def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, init_cfg=None, with_map_encoder=False):
+    def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, num_reg_outputs=2, with_map_encoder=False, init_cfg=None):
         super(JDMPForecastTransformer, self).__init__(init_cfg=init_cfg)
         self.embed_dims = embed_dims
         self.num_propagated = num_propagated
@@ -893,10 +893,12 @@ class JDMPForecastTransformer(BaseModule):
         self.num_forecast_layers = num_forecast_layers
         self.pc_range = nn.Parameter(torch.tensor(pc_range), requires_grad=False)
         self.with_map_encoder = with_map_encoder
+        self.num_reg_outputs = num_reg_outputs
+        self.num_timesteps = 12
 
         anchor_infos = pickle.load(open('ckpts/motion_anchor_infos_mode6.pkl', 'rb'))
         self.kmeans_anchors = torch.stack(
-            [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float() # G, M, 12, 2
+            [torch.from_numpy(a) for a in anchor_infos["anchors_all"]]).float() # G, M, T, 2
         self.num_forecast_modes = self.kmeans_anchors.size(1)
         self.num_forecast_groups = self.kmeans_anchors.size(0)
 
@@ -926,7 +928,7 @@ class JDMPForecastTransformer(BaseModule):
         for _ in range(self.num_reg_fcs):
             traj_reg_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
             traj_reg_branch.append(nn.ReLU())
-        traj_reg_branch.append(nn.Linear(self.embed_dims, 12 * 2))
+        traj_reg_branch.append(nn.Linear(self.embed_dims, self.num_timesteps * self.num_reg_outputs))
         traj_reg_branch = nn.Sequential(*traj_reg_branch)
         self.traj_reg_branches = nn.ModuleList([copy.deepcopy(traj_reg_branch) for i in range(self.num_forecast_layers)])
 
@@ -1007,7 +1009,7 @@ class JDMPForecastTransformer(BaseModule):
                                             batch_first=True) 
                 for i in range(self.num_forecast_layers)])
         
-        self.unflatten_traj = nn.Unflatten(3, (12, 2))
+        self.unflatten_traj = nn.Unflatten(3, (self.num_timesteps, self.num_reg_outputs))
         self.log_softmax = nn.LogSoftmax(dim=2)
 
     def init_weights(self):
@@ -1021,7 +1023,7 @@ class JDMPForecastTransformer(BaseModule):
         B = detection_query.size(0)
         A = self.num_propagated
         M = self.num_forecast_modes
-        T = 12
+        T = self.num_timesteps
 
         # Map query
         if self.with_map_encoder:
@@ -1033,12 +1035,12 @@ class JDMPForecastTransformer(BaseModule):
         detection_reference_point_norm = self.norm_points_2d(detection_reference_point)
         detection_query_pos = self.forecast_det_query_embedding(pos2posemb2d(detection_reference_point_norm))
 
-        agent_level_anchors = self.kmeans_anchors.to(detection_reference_point.device).detach() # G, M, 12, 2
-        scene_level_ego_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose) # B, A, G, M, 12, 2
+        agent_level_anchors = self.kmeans_anchors.to(detection_reference_point.device).detach() # G, M, T, 2
+        scene_level_ego_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose) # B, A, G, M, T, 2
         scene_level_offset_anchors = self.anchor_coordinate_transform(agent_level_anchors, detection_reference_pose, with_translation_transform=False)  
         
-        agent_level_norm = self.norm_points_2d(agent_level_anchors) # G, M, 12, 2
-        scene_level_ego_norm = self.norm_points_2d(scene_level_ego_anchors) # B, A, G, M, 12, 2
+        agent_level_norm = self.norm_points_2d(agent_level_anchors) # G, M, T, 2
+        scene_level_ego_norm = self.norm_points_2d(scene_level_ego_anchors) # B, A, G, M, T, 2
         scene_level_offset_norm = self.norm_points_2d(scene_level_offset_anchors)
 
         agent_level_embedding = self.forecast_agent_level_embedding(pos2posemb2d(agent_level_norm[..., -1, :]))  # G, M, C
@@ -1051,7 +1053,7 @@ class JDMPForecastTransformer(BaseModule):
         learnable_embed = learnable_query_pos[None, None, ...].expand(B, A, -1, -1, -1) # B, A, G, M, C
 
         # select class anchor
-        # B, A, G, M, 12, 2 -> B, A, M, 12 ,2
+        # B, A, G, M, T, 2 -> B, A, M, T ,2
         scene_level_offset_anchors = self.group_mode_query(detection_reference_label, scene_level_offset_anchors)  
         # B, A, G, P, D-> B, A, P, D
         agent_level_embedding = self.group_mode_query(detection_reference_label, agent_level_embedding)  
@@ -1109,7 +1111,7 @@ class JDMPForecastTransformer(BaseModule):
             new_reference_trajs = torch.zeros_like(reference_trajs_input)
             new_reference_trajs = tmp[..., :2]
             reference_trajs = new_reference_trajs.detach()
-            reference_trajs_input = reference_trajs.unsqueeze(4)  # B A N 12 NUM_LEVEL  2
+            reference_trajs_input = reference_trajs.unsqueeze(4)  # B A N T NUM_LEVEL  2
 
             ep_offset_embed = reference_trajs.detach()
             ep_ego_embed = self.trajectory_coordinate_transform(reference_trajs, detection_reference_pose, with_rotation_transform=False).detach()
@@ -1138,8 +1140,9 @@ class JDMPForecastTransformer(BaseModule):
             # outputs_class = self.log_softmax(outputs_class.squeeze(3))
             outputs_traj_scores.append(outputs_class)
 
-            # for bs in range(tmp.shape[0]):
-            #     tmp[bs] = self.bivariate_gaussian_activation(tmp[bs])
+            if self.num_reg_outputs == 5 or self.num_reg_outputs == 4:
+                for bs in range(tmp.shape[0]):
+                    tmp[bs] = self.bivariate_gaussian_activation(tmp[bs])
             outputs_trajs.append(tmp)
         outputs_traj_scores = torch.stack(outputs_traj_scores)
         outputs_trajs = torch.stack(outputs_trajs)
@@ -1260,15 +1263,22 @@ class JDMPForecastTransformer(BaseModule):
         Returns:
             torch.Tensor: Output tensor containing the parameters of the bivariate Gaussian distribution.
         """
-        mu_x = ip[..., 0:1]
-        mu_y = ip[..., 1:2]
-        sig_x = ip[..., 2:3]
-        sig_y = ip[..., 3:4]
-        rho = ip[..., 4:5]
-        sig_x = torch.exp(sig_x)
-        sig_y = torch.exp(sig_y)
-        rho = torch.tanh(rho)
-        out = torch.cat([mu_x, mu_y, sig_x, sig_y, rho], dim=-1)
+        mu_x = ip[..., 0:1].clone()
+        mu_y = ip[..., 1:2].clone()
+        sig_x = ip[..., 2:3].clone()
+        sig_y = ip[..., 3:4].clone()
+        sig_x = torch.nn.functional.softplus(sig_x)
+        sig_y = torch.nn.functional.softplus(sig_y)
+        # sig_x = torch.exp(sig_x)
+        # sig_y = torch.exp(sig_y)
+        if ip.shape[-1] == 4:
+            out = torch.cat([mu_x, mu_y, sig_x, sig_y], dim=-1)
+        elif ip.shape[-1] == 5:
+            rho = ip[..., 4:5].clone()
+            rho = torch.tanh(rho)
+            out = torch.cat([mu_x, mu_y, sig_x, sig_y, rho], dim=-1)
+        else:
+            raise ValueError(f"Invalid number of input parameters: {ip.shape[-1]}")
         return out
 
     def pose2d_vec_to_mat(self, pose2d_vec):
