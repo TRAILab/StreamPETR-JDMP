@@ -1086,7 +1086,7 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
             max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
             max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
-            selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
+            selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0,:2], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
             selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)
             forecast_points = selected_preds + detection_reference_point
             forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
@@ -1235,12 +1235,14 @@ class JDMPPETRHead(AnchorFreeHead):
                 matched_pred_inds = matched_pred_inds[matched_dist < self.assigner_forecast_threshold]
 
             # forecast targets
+            num_forecasts = forecast_pred.size(0)
             code_size = forecast_pred.size(-1)
-            assert code_size == 2
             forecast_weights = torch.zeros_like(forecast_pred)
             forecast_targets = torch.zeros_like(forecast_pred)
-            forecast_labels = torch.zeros_like(forecast_score)
-            forecast_label_weights = torch.zeros_like(forecast_score)
+            forecast_labels = forecast_pred.new_zeros(num_forecasts, dtype=torch.int64)
+            forecast_label_weights = forecast_pred.new_zeros(num_forecasts)
+            # forecast_labels = torch.zeros_like(forecast_score)
+            # forecast_label_weights = torch.zeros_like(forecast_score)
             gt_forecasting_pos_2d = gt_forecasting_bboxes_3d[..., :2].float()
             gt_forecasting_pos_2d = (gt_forecasting_pos_2d[:, 1:] - gt_forecasting_pos_2d[:, 0:1]).float().unsqueeze(1)
             if len(matched_pred_inds) > 0:
@@ -1249,12 +1251,12 @@ class JDMPPETRHead(AnchorFreeHead):
                 min_ade_inds = forecast_ade.argmin(dim=1)
                 forecast_targets[matched_pred_inds] = gt_forecasting_pos_2d[matched_gt_inds]
                 forecast_weights[matched_pred_inds, min_ade_inds] = gt_forecasting_masks[matched_gt_inds, 1:].float().unsqueeze(-1)
-                forecast_labels[matched_pred_inds, min_ade_inds] = 1
-                forecast_label_weights[matched_pred_inds] = 1
-            forecast_targets = forecast_targets.reshape(-1, code_size)
-            forecast_weights = forecast_weights.reshape(-1, code_size)
-            forecast_labels = forecast_labels.reshape(-1)
-            forecast_label_weights = forecast_label_weights.reshape(-1)
+                forecast_labels[matched_pred_inds] = min_ade_inds
+                forecast_label_weights[matched_pred_inds] = 1.0
+            # forecast_targets = forecast_targets.reshape(-1, code_size)
+            # forecast_weights = forecast_weights.reshape(-1, code_size)
+            # forecast_labels = forecast_labels.reshape(-1)
+            # forecast_label_weights = forecast_label_weights.reshape(-1)
         else:
             forecast_weights = torch.zeros_like(bbox_weights)
             forecast_targets = torch.zeros_like(bbox_targets)
@@ -1401,7 +1403,7 @@ class JDMPPETRHead(AnchorFreeHead):
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
         bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
         num_imgs = forecast_preds.size(0)
-        forecast_preds_list = [forecast_preds[i] for i in range(num_imgs)]
+        forecast_preds_list = [forecast_preds[i,...,:2] for i in range(num_imgs)]
         forecast_scores_list = [forecast_scores[i] for i in range(num_imgs)]
         cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, 
                                            forecast_scores_list, forecast_preds_list,
@@ -1450,24 +1452,30 @@ class JDMPPETRHead(AnchorFreeHead):
 
         if self.with_attn_forecast:
             # Forecast regression loss
-            forecast_avg_factor = torch.hstack([t[:,0].sum() for t in forecast_weights_list]).sum() 
+            forecast_avg_factor = torch.hstack([t[...,0].sum() for t in forecast_weights_list]).sum() 
             forecast_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_avg_factor))
             forecast_avg_factor = max(forecast_avg_factor, 1.)
             original_shape = forecast_preds.size()
-            forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-1))
-            isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
-            loss_forecast = self.loss_forecast(forecast_preds[isnotnan, :2], forecast_targets[isnotnan, :2], 
-                                            forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
+            forecast_preds = forecast_preds.reshape(-1, forecast_preds.size(-3), forecast_preds.size(-2), forecast_preds.size(-1))
+            # isnotnan = torch.isfinite(forecast_targets).all(dim=-1)
+            num_reg_outputs = self.forecast_transformer.num_reg_outputs if self.with_attn_forecast else 2
+            # loss_forecast = self.loss_forecast(forecast_preds[isnotnan, :num_reg_outputs], forecast_targets[isnotnan, :2], 
+            #                                 forecast_weights[isnotnan, :2], avg_factor=forecast_avg_factor)
+            loss_forecast = self.loss_forecast(forecast_preds[..., :num_reg_outputs], forecast_targets[..., :2], 
+                                            forecast_weights[..., :2], avg_factor=forecast_avg_factor)
             
             # Forecast probability loss
             # loss_forecast_class = - torch.squeeze(log_probs.gather(1, inds.unsqueeze(1)))
-            forecast_cls_avg_factor = torch.hstack([t[:].sum() for t in forecast_label_weights_list]).sum() 
+            forecast_cls_avg_factor = torch.hstack([t.sum() for t in forecast_label_weights_list]).sum() 
             forecast_cls_avg_factor = reduce_mean(loss_bbox.new_tensor(forecast_cls_avg_factor))
             forecast_cls_avg_factor = max(forecast_cls_avg_factor, 1)
-            forecast_scores = forecast_scores.reshape(-1) 
-            isnotnan = torch.isfinite(forecast_labels).all(dim=-1)
-            loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
-                                                    forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
+            # forecast_scores = forecast_scores.reshape(-1) 
+            # isnotnan = torch.isfinite(forecast_labels).all(dim=-1)
+            # loss_forecast_cls = self.loss_forecast_cls(forecast_scores[isnotnan], forecast_labels[isnotnan],
+            #                                         forecast_label_weights[isnotnan], avg_factor=forecast_cls_avg_factor)
+            forecast_scores = forecast_scores.reshape(-1, self.forecast_transformer.num_forecast_modes)
+            loss_forecast_cls = self.loss_forecast_cls(forecast_scores, forecast_labels,
+                                                    forecast_label_weights, avg_factor=forecast_cls_avg_factor)
         else:
             loss_forecast = torch.zeros_like(loss_bbox)
             loss_forecast_cls = torch.zeros_like(loss_cls)
@@ -1480,7 +1488,7 @@ class JDMPPETRHead(AnchorFreeHead):
             timestamp = datetime.now().strftime('%Y%m%d_%H%M')
             filename = f'output/viz/forecast_debug/{timestamp}_loss.png'
             if not os.path.exists(filename):
-                pred_pos = forecast_preds[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
+                pred_pos = forecast_preds[isnotnan,...,:2].reshape(original_shape)[0].detach().cpu().numpy()
                 gt_pos = forecast_targets[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
                 flags = forecast_weights[isnotnan].reshape(original_shape)[0].detach().cpu().numpy()
                 labels = ['pred', 'gt']
@@ -1746,7 +1754,7 @@ class JDMPPETRHead(AnchorFreeHead):
         """
         if 'all_forecast_preds' not in preds_dicts:
             return None 
-        all_forecast_preds = preds_dicts['all_forecast_preds'][-1].cpu()
+        all_forecast_preds = preds_dicts['all_forecast_preds'][-1,...,:2].cpu()
         all_forecast_reference_points = preds_dicts['all_forecast_reference_points'].cpu()
         all_forecast_scores = preds_dicts['all_forecast_scores'][-1].cpu().squeeze(-1)
         if all_forecast_preds.shape[-1] == 3:
