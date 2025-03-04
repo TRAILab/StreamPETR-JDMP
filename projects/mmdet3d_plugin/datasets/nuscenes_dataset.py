@@ -570,6 +570,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                     prob = np.array([forecast_top_probs[pred_id]])
                     if num_modes == 1:
                         prob = prob[0]
+                    if not isinstance(prob, np.ndarray):
+                        prob = np.array([prob])
                     preds_full.append(Prediction(instance_token, sample_token, pred, prob).serialize())
 
             # Match forecast to gt
@@ -593,6 +595,8 @@ class CustomNuScenesDataset(NuScenesDataset):
                 prob = forecast_probs[pred_id]
                 if num_modes == 1:
                     prob = prob[0]
+                if not isinstance(prob, np.ndarray):
+                    prob = np.array([prob])
                 preds.append(Prediction(instance_token, sample_token, pred, prob).serialize())
 
         # Write results to file
