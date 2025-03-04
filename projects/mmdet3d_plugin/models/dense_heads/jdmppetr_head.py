@@ -1167,8 +1167,13 @@ class JDMPPETRHead(AnchorFreeHead):
                 for j, (b, idx) in enumerate(zip(bid, map_known_indice)):
                     layer_scores[b].append(output_known_forecast_scores[i, b, idx])
                     layer_preds[b].append(output_known_forecast_preds[i, b, idx])
-                layer_scores = [torch.stack(scores) for scores in layer_scores]
-                layer_preds = [torch.stack(preds) for preds in layer_preds]
+                # Fix: Handle empty lists for forecast scores and predictions
+                layer_scores = [torch.stack(scores) if len(scores) > 0 else torch.zeros((0, *output_known_forecast_scores.shape[3:]), 
+                                                                                      device=output_known_forecast_scores.device) 
+                               for scores in layer_scores]
+                layer_preds = [torch.stack(preds) if len(preds) > 0 else torch.zeros((0, *output_known_forecast_preds.shape[3:]), 
+                                                                                   device=output_known_forecast_preds.device) 
+                              for preds in layer_preds]
                 output_known_forecast_scores_list.append(layer_scores)
                 output_known_forecast_preds_list.append(layer_preds)
             output_known_forecasts = (output_known_forecast_scores_list, output_known_forecast_preds_list, output_known_class_list, output_known_coord_list)        
