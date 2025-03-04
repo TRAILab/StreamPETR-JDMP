@@ -507,7 +507,7 @@ class JDMPPetr3D(MVXTwoStageDetector):
             loss_inputs = [gt_bboxes_3d, gt_labels_3d, gt_forecasting_bboxes_3d, gt_forecasting_masks, outs]
             losses = self.pts_bbox_head.loss(*loss_inputs)
             if hasattr(self.pts_bbox_head, 'forecast_transformer'):
-                num_losses = 4*self.pts_bbox_head.detect_transformer.decoder.num_layers+2*self.pts_bbox_head.forecast_transformer.num_forecast_layers
+                num_losses = 4*self.pts_bbox_head.detect_transformer.decoder.num_layers+4*self.pts_bbox_head.forecast_transformer.num_forecast_layers
             else:
                 num_losses = 5*self.pts_bbox_head.detect_transformer.decoder.num_layers
             if self.with_img_roi_head and (self.freeze_layer not in ['roi_head', 'det_head']):

@@ -888,7 +888,7 @@ class JDMPForecastTransformer(BaseModule):
     def __init__(self, embed_dims=256, num_propagated=128, num_reg_fcs=2, num_forecast_layers=3, pc_range=None, num_reg_outputs=2, with_map_encoder=False, init_cfg=None):
         super(JDMPForecastTransformer, self).__init__(init_cfg=init_cfg)
         self.embed_dims = embed_dims
-        self.num_propagated = num_propagated
+        self.num_propagated = num_propagated # not needed for forecast
         self.num_reg_fcs = num_reg_fcs
         self.num_forecast_layers = num_forecast_layers
         self.pc_range = nn.Parameter(torch.tensor(pc_range), requires_grad=False)
@@ -1021,7 +1021,7 @@ class JDMPForecastTransformer(BaseModule):
 
     def forward(self, detection_query, detection_reference_pose, detection_reference_label, map_query=None, map_reference_pos=None):
         B = detection_query.size(0)
-        A = self.num_propagated
+        A = detection_query.shape[1]
         M = self.num_forecast_modes
         T = self.num_timesteps
 

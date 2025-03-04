@@ -985,22 +985,13 @@ class JDMPPETRHead(AnchorFreeHead):
         if self.with_attn_forecast:
             if self.forecast_all:
                 self.forecast_transformer.num_propagated = self.num_propagated + self.num_query
-                if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                    detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
-                    detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
-                    detection_reference_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
-                    detection_reference_label = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
-                    detection_reference_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
-                    detection_reference_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
-                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
-                else:
-                    detection_reference_point = all_bbox_preds[..., :3][-1]
-                    detection_query = outs_dec[-1]
-                    detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
-                    detection_reference_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
-                    detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
-                    detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
-                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
+                detection_reference_point = all_bbox_preds[..., :3][-1]
+                detection_query = outs_dec[-1]
+                detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                detection_reference_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
+                detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
+                detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
+                detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
                 _, topk_indexes = torch.topk(detection_reference_score, self.topk_proposals, dim=1)
             else:
                 detection_query = self.memory_embedding[:, :self.num_propagated]
@@ -1046,14 +1037,9 @@ class JDMPPETRHead(AnchorFreeHead):
             # TODO: add mode to reshape above and below
 
         elif self.with_velo_forecast:
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
-                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:]
-                rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :].sigmoid().topk(1, dim=-1).values[..., 0:1]
-            else:
-                rec_reference_points = all_bbox_preds[..., :3]
-                rec_velo = all_bbox_preds[..., -2:]
-                rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
+            rec_reference_points = all_bbox_preds[..., :3]
+            rec_velo = all_bbox_preds[..., -2:]
+            rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
             if not self.forecast_all:
                 _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
                 topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
@@ -1076,17 +1062,22 @@ class JDMPPETRHead(AnchorFreeHead):
             all_forecast_preds = all_forecast_preds[..., 1:, 0:2] - all_forecast_preds[..., 0:1, 0:2]
         else:
             num_future_frames = 12
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
-            else:
-                rec_reference_points = all_bbox_preds[..., :3]
+            rec_reference_points = all_bbox_preds[..., :3]
             all_forecast_preds = torch.zeros((N, B, rec_reference_points.shape[2], 1, num_future_frames, 2), device=rec_reference_points.device)
             all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
             detection_reference_point = rec_reference_points[-1]
         if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
-            max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
+            if mask_dict and mask_dict['pad_size'] > 0:
+                f_preds = all_forecast_preds[:, :, mask_dict['pad_size']:, :, :, :]
+                f_scores = all_forecast_scores[:, :, mask_dict['pad_size']:, :, :]
+                f_query = all_forecast_query[:, :, mask_dict['pad_size']:, :, :]
+            else:
+                f_preds = all_forecast_preds
+                f_scores = all_forecast_scores
+                f_query = all_forecast_query
+            max_indices = torch.argmax(f_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
             max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
-            selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0,:2], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
+            selected_preds = torch.gather(f_preds[-1,:,:,:,0,:2], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
             selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)
             forecast_points = selected_preds + detection_reference_point
             forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
@@ -1098,8 +1089,8 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
             self.memory_velo[:, :self.num_propagated] = selected_preds[...,:2].detach().clone()
             if self.with_attn_forecast: 
-                forecast_query = all_forecast_query[-1].detach().clone() # [8, 428, 18, 256]
-                forecast_scores_squeezed = all_forecast_scores[-1].squeeze(-1)  # Shape: [8, 428, 18]
+                forecast_query = f_query[-1].detach().clone() # [8, 428, 18, 256]
+                forecast_scores_squeezed = f_scores[-1].squeeze(-1)  # Shape: [8, 428, 18]
                 _, max_indices = torch.max(forecast_scores_squeezed, dim=2)  # max_indices shape: [8, 428]
                 max_indices_expanded = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [8, 428, 1, 1]
                 max_indices_expanded = max_indices_expanded.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [8, 428, 1, 256]
@@ -1112,24 +1103,32 @@ class JDMPPETRHead(AnchorFreeHead):
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
             output_known_coord = all_bbox_preds[:, :, :mask_dict['pad_size'], :]
+            output_known_forecast_scores = all_forecast_scores[:, :, :mask_dict['pad_size'], :, :]
+            output_known_forecast_preds = all_forecast_preds[:, :, :mask_dict['pad_size'], :, :, :]
             outputs_class = all_cls_scores[:, :, mask_dict['pad_size']:, :]
             outputs_coord = all_bbox_preds[:, :, mask_dict['pad_size']:, :]
+            outputs_forecast_scores = all_forecast_scores[:, :, mask_dict['pad_size']:, :, :]
+            outputs_forecast_preds = all_forecast_preds[:, :, mask_dict['pad_size']:, :, :, :]
+            outputs_forecast_reference_points = detection_reference_point[:, mask_dict['pad_size']:, :]
             mask_dict['output_known_lbs_bboxes']=(output_known_class, output_known_coord)
+            mask_dict['output_known_forecasts']=(output_known_forecast_scores, output_known_forecast_preds)
             outs = {
                 'all_cls_scores': outputs_class,
                 'all_bbox_preds': outputs_coord,
-                'dn_mask_dict':mask_dict,
-
+                'dn_mask_dict': mask_dict,
+                'all_forecast_preds': outputs_forecast_preds,
+                'all_forecast_scores': outputs_forecast_scores,
+                'all_forecast_reference_points': outputs_forecast_reference_points,
             }
         else:
             outs = {
                 'all_cls_scores': all_cls_scores,
                 'all_bbox_preds': all_bbox_preds,
                 'dn_mask_dict': None,
+                'all_forecast_preds': all_forecast_preds,
+                'all_forecast_scores': all_forecast_scores,
+                'all_forecast_reference_points': detection_reference_point,
             }
-        outs['all_forecast_preds'] = all_forecast_preds
-        outs['all_forecast_scores'] = all_forecast_scores
-        outs['all_forecast_reference_points'] = detection_reference_point
 
         return outs
     
@@ -1140,16 +1139,43 @@ class JDMPPETRHead(AnchorFreeHead):
             mask_dict: a dict that contains dn information
         """
         output_known_class, output_known_coord = mask_dict['output_known_lbs_bboxes']
+        output_known_forecast_scores, output_known_forecast_preds = mask_dict['output_known_forecasts']
         known_labels, known_bboxs = mask_dict['known_lbs_bboxes']
         map_known_indice = mask_dict['map_known_indice'].long()
         known_indice = mask_dict['known_indice'].long().cpu()
         batch_idx = mask_dict['batch_idx'].long()
         bid = batch_idx[known_indice]
         if len(output_known_class) > 0:
+            num_detection_layers = output_known_class.size(0)
+            num_forecast_layers = output_known_forecast_scores.size(0)
+            num_batch = output_known_forecast_scores.shape[1]
+            output_known_forecast_scores_list = []
+            output_known_forecast_preds_list = []
+            i = num_detection_layers-1
+            layer_class = [[] for _ in range(num_batch)]
+            layer_coord = [[] for _ in range(num_batch)]
+            for j, (b, idx) in enumerate(zip(bid, map_known_indice)):
+                layer_class[b].append(output_known_class[i, b, idx])
+                layer_coord[b].append(output_known_coord[i, b, idx])
+            layer_class = [torch.stack(cls) for cls in layer_class]
+            layer_coord = [torch.stack(coord) for coord in layer_coord]
+            output_known_class_list = [layer_class for _ in range(num_forecast_layers)]
+            output_known_coord_list = [layer_coord for _ in range(num_forecast_layers)]
+            for i in range(num_forecast_layers):
+                layer_scores = [[] for _ in range(num_batch)]
+                layer_preds = [[] for _ in range(num_batch)]
+                for j, (b, idx) in enumerate(zip(bid, map_known_indice)):
+                    layer_scores[b].append(output_known_forecast_scores[i, b, idx])
+                    layer_preds[b].append(output_known_forecast_preds[i, b, idx])
+                layer_scores = [torch.stack(scores) for scores in layer_scores]
+                layer_preds = [torch.stack(preds) for preds in layer_preds]
+                output_known_forecast_scores_list.append(layer_scores)
+                output_known_forecast_preds_list.append(layer_preds)
+            output_known_forecasts = (output_known_forecast_scores_list, output_known_forecast_preds_list, output_known_class_list, output_known_coord_list)        
             output_known_class = output_known_class.permute(1, 2, 0, 3)[(bid, map_known_indice)].permute(1, 0, 2)
             output_known_coord = output_known_coord.permute(1, 2, 0, 3)[(bid, map_known_indice)].permute(1, 0, 2)
         num_tgt = known_indice.numel()
-        return known_labels, known_bboxs, output_known_class, output_known_coord, num_tgt
+        return known_labels, known_bboxs, output_known_class, output_known_coord, output_known_forecasts, num_tgt
 
 
     def _get_target_single(self,
@@ -1235,6 +1261,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 matched_pred_inds = matched_pred_inds[matched_dist < self.assigner_forecast_threshold]
 
             # forecast targets
+            forecast_pred = forecast_pred[...,:2]
             num_forecasts = forecast_pred.size(0)
             code_size = forecast_pred.size(-1)
             forecast_weights = torch.zeros_like(forecast_pred)
@@ -1399,11 +1426,11 @@ class JDMPPETRHead(AnchorFreeHead):
             dict[str, Tensor]: A dictionary of loss components for outputs from
                 a single decoder layer.
         """
-        num_imgs = cls_scores.size(0)
+        num_imgs = len(cls_scores)
         cls_scores_list = [cls_scores[i] for i in range(num_imgs)]
         bbox_preds_list = [bbox_preds[i] for i in range(num_imgs)]
-        num_imgs = forecast_preds.size(0)
-        forecast_preds_list = [forecast_preds[i,...,:2] for i in range(num_imgs)]
+        num_imgs = len(forecast_preds)
+        forecast_preds_list = [forecast_preds[i] for i in range(num_imgs)]
         forecast_scores_list = [forecast_scores[i] for i in range(num_imgs)]
         cls_reg_targets = self.get_targets(cls_scores_list, bbox_preds_list, 
                                            forecast_scores_list, forecast_preds_list,
@@ -1422,6 +1449,10 @@ class JDMPPETRHead(AnchorFreeHead):
         forecast_label_weights = torch.cat(forecast_label_weights_list, 0)
         forecast_targets = torch.cat(forecast_targets_list, 0)
         forecast_weights = torch.cat(forecast_weights_list, 0)
+        cls_scores = torch.cat(cls_scores_list, 0)
+        bbox_preds = torch.cat(bbox_preds_list, 0)
+        forecast_preds = torch.cat(forecast_preds_list, 0)
+        forecast_scores = torch.cat(forecast_scores_list, 0)
 
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.cls_out_channels)
@@ -1633,18 +1664,19 @@ class JDMPPETRHead(AnchorFreeHead):
 
         # TODO: fix workaround for calling loss_single twice due to different number of detect and forecast decoder layers
         # Separate losses and only call them when needed (check frozen)
-        if hasattr(self, 'forecast_transformer'):
-            assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
-            n_layers = self.forecast_transformer.num_forecast_layers
-        else:
-            n_layers = self.detect_transformer.decoder.num_layers // 2
-        all_bbox_preds_last = all_bbox_preds[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
-        all_cls_scores_last = all_cls_scores[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
-        _, _, losses_forecast_cls, losses_forecast = multi_apply(
-            self.loss_single, all_cls_scores_last, all_bbox_preds_last, all_forecast_scores, all_forecast_preds,
-            all_gt_bboxes_list[:n_layers], all_gt_labels_list[:n_layers],
-            all_gt_forecasting_bboxes_3d[:n_layers], all_gt_forecasting_masks[:n_layers],
-            all_gt_bboxes_ignore_list[:n_layers])
+        if self.with_attn_forecast:
+            if hasattr(self, 'forecast_transformer'):
+                assert 2*self.forecast_transformer.num_forecast_layers == self.detect_transformer.decoder.num_layers
+                n_layers = self.forecast_transformer.num_forecast_layers
+            else:
+                n_layers = self.detect_transformer.decoder.num_layers // 2
+            all_bbox_preds_last = all_bbox_preds[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
+            all_cls_scores_last = all_cls_scores[-1].unsqueeze(0).repeat(n_layers, 1, 1, 1)
+            _, _, losses_forecast_cls, losses_forecast = multi_apply(
+                self.loss_single, all_cls_scores_last, all_bbox_preds_last, all_forecast_scores, all_forecast_preds,
+                all_gt_bboxes_list[:n_layers], all_gt_labels_list[:n_layers],
+                all_gt_forecasting_bboxes_3d[:n_layers], all_gt_forecasting_masks[:n_layers],
+                all_gt_bboxes_ignore_list[:n_layers])
         
         all_forecast_preds_repeat = all_forecast_preds.repeat(2,1,1,1,1,1)
         all_forecast_scores_repeat = all_forecast_scores.repeat(2,1,1,1,1)
@@ -1660,8 +1692,9 @@ class JDMPPETRHead(AnchorFreeHead):
         # loss from the last decoder layer
         loss_dict['loss_cls'] = losses_cls[-1]
         loss_dict['loss_bbox'] = losses_bbox[-1]
-        loss_dict['loss_forecast'] = losses_forecast[-1]
-        loss_dict['loss_forecast_cls'] = losses_forecast_cls[-1]
+        if self.with_attn_forecast:
+            loss_dict['loss_forecast'] = losses_forecast[-1]
+            loss_dict['loss_forecast_cls'] = losses_forecast_cls[-1]
 
         # loss from other decoder layers
         num_dec_layer = 0
@@ -1670,14 +1703,16 @@ class JDMPPETRHead(AnchorFreeHead):
             loss_dict[f'd{num_dec_layer}.loss_cls'] = loss_cls_i
             loss_dict[f'd{num_dec_layer}.loss_bbox'] = loss_bbox_i
             num_dec_layer += 1
-        num_dec_layer = 0
-        for loss_forecast_i, loss_forecast_cls_i in zip(losses_forecast[:-1],
-                                             losses_forecast_cls[:-1]):
-            loss_dict[f'd{num_dec_layer}.loss_forecast'] = loss_forecast_i
-            loss_dict[f'd{num_dec_layer}.loss_forecast_cls'] = loss_forecast_cls_i
-            num_dec_layer += 1
+        if self.with_attn_forecast:
+            num_dec_layer = 0
+            for loss_forecast_i, loss_forecast_cls_i in zip(losses_forecast[:-1],
+                                                losses_forecast_cls[:-1]):
+                loss_dict[f'd{num_dec_layer}.loss_forecast'] = loss_forecast_i
+                loss_dict[f'd{num_dec_layer}.loss_forecast_cls'] = loss_forecast_cls_i
+                num_dec_layer += 1
         if preds_dicts['dn_mask_dict'] is not None:
-            known_labels, known_bboxs, output_known_class, output_known_coord, num_tgt = self.prepare_for_loss(preds_dicts['dn_mask_dict'])
+            known_labels, known_bboxs, output_known_class, output_known_coord, \
+                output_known_forecasts, num_tgt = self.prepare_for_loss(preds_dicts['dn_mask_dict'])
             all_known_bboxs_list = [known_bboxs for _ in range(num_dec_layers)]
             all_known_labels_list = [known_labels for _ in range(num_dec_layers)]
             all_num_tgts_list = [
@@ -1696,6 +1731,21 @@ class JDMPPETRHead(AnchorFreeHead):
                 loss_dict[f'd{num_dec_layer}.dn_loss_cls'] = loss_cls_i
                 loss_dict[f'd{num_dec_layer}.dn_loss_bbox'] = loss_bbox_i
                 num_dec_layer += 1
+            if self.with_attn_forecast:
+                output_known_forecast_scores, output_known_forecast_preds, output_known_class, output_known_coord = output_known_forecasts
+                _, _, dn_losses_forecast_cls, dn_losses_forecast = multi_apply(
+                    self.loss_single, output_known_class, output_known_coord, output_known_forecast_scores, output_known_forecast_preds,
+                    all_gt_bboxes_list[:n_layers], all_gt_labels_list[:n_layers],
+                    all_gt_forecasting_bboxes_3d[:n_layers], all_gt_forecasting_masks[:n_layers],
+                    all_gt_bboxes_ignore_list[:n_layers])
+                loss_dict['dn_loss_forecast'] = dn_losses_forecast[-1]
+                loss_dict['dn_loss_forecast_cls'] = dn_losses_forecast_cls[-1]
+                num_dec_layer = 0
+                for loss_forecast_i, loss_forecast_cls_i in zip(dn_losses_forecast[:-1],
+                                                dn_losses_forecast_cls[:-1]):
+                    loss_dict[f'd{num_dec_layer}.dn_loss_forecast'] = loss_forecast_i
+                    loss_dict[f'd{num_dec_layer}.dn_loss_forecast_cls'] = loss_forecast_cls_i
+                    num_dec_layer += 1
                 
         elif self.with_dn:
             dn_losses_cls, dn_losses_bbox, _, _ = multi_apply(
@@ -1714,7 +1764,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 num_dec_layer += 1
         
         # check loss dict has all keys
-        num_losses = 4*self.detect_transformer.decoder.num_layers + 2*n_layers
+        num_losses = 4*self.detect_transformer.decoder.num_layers + 4*n_layers
         assert len(loss_dict) == num_losses, f"Expected {num_losses} losses, but got {len(loss_dict)}. Keys: {list(loss_dict.keys())}"
 
         return loss_dict
