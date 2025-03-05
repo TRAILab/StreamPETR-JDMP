@@ -383,10 +383,11 @@ class JDMPPETRHead(AnchorFreeHead):
         self.memory_rotation = None
         if self.forecast_mem_update:
             self.memory_reference_point_forecast = None
-            self.memory_velo_forecast = None
-            self.memory_embedding_forecast = None
             self.memory_reference_point_forecast_atdet = None
-            self.memory_velo_forecast_atdet = None
+            if self.with_attn_forecast:
+                self.memory_velo_forecast = None
+                self.memory_embedding_forecast = None
+                self.memory_velo_forecast_atdet = None
 
     def pre_update_memory(self, data):
         x = data['prev_exists']
@@ -402,10 +403,11 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_label = x.new_zeros(B, self.memory_len, 1)
             if self.forecast_mem_update:
                 self.memory_reference_point_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 3)
-                self.memory_velo_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 2)
-                self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
                 self.memory_reference_point_forecast_atdet = x.new_zeros(B, self.memory_len, 3)
-                self.memory_velo_forecast_atdet = x.new_zeros(B, self.memory_len, 2)
+                if self.with_attn_forecast:
+                    self.memory_velo_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 2)
+                    self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
+                    self.memory_velo_forecast_atdet = x.new_zeros(B, self.memory_len, 2)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
@@ -423,28 +425,31 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_label = memory_refresh(self.memory_label[:, :self.memory_len], x)
             if self.forecast_mem_update:
                 self.memory_reference_point_forecast = transform_reference_points(self.memory_reference_point_forecast, data['ego_pose_inv'], reverse=False)
-                if self.memory_vel_transform:
-                    self.memory_velo_forecast = transform_velocity(self.memory_velo_forecast, data['ego_pose_inv'])
                 self.memory_reference_point_forecast = memory_refresh(self.memory_reference_point_forecast[:, :self.memory_len], x)
-                self.memory_embedding_forecast = memory_refresh(self.memory_embedding_forecast[:, :self.memory_len], x)
-                self.memory_velo_forecast = memory_refresh(self.memory_velo_forecast[:, :self.memory_len], x)
+                if self.with_attn_forecast:
+                    self.memory_embedding_forecast = memory_refresh(self.memory_embedding_forecast[:, :self.memory_len], x)
+                    if self.memory_vel_transform:
+                        self.memory_velo_forecast = transform_velocity(self.memory_velo_forecast, data['ego_pose_inv'])
+                    self.memory_velo_forecast = memory_refresh(self.memory_velo_forecast[:, :self.memory_len], x)
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
             pseudo_reference_points = self.pseudo_reference_points.weight * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3]
             self.memory_reference_point[:, :self.num_propagated]  = self.memory_reference_point[:, :self.num_propagated] + (1 - x).view(B, 1, 1) * pseudo_reference_points
-            self.memory_reference_point_forecast[:, :self.num_propagated] = self.memory_reference_point_forecast[:, :self.num_propagated] \
-                + (1 - x).view(B, 1, 1, 1) * pseudo_reference_points.unsqueeze(1).expand(-1, self.num_frames, -1)
-            # self.memory_reference_point_forecast[:, :self.num_propagated, 0] = self.memory_reference_point_forecast[:, :self.num_propagated] \
-            #     + (1 - x).view(B, 1, 1) * pseudo_reference_points
+            if self.forecast_mem_update:
+                self.memory_reference_point_forecast[:, :self.num_propagated] = self.memory_reference_point_forecast[:, :self.num_propagated] \
+                    + (1 - x).view(B, 1, 1, 1) * pseudo_reference_points.unsqueeze(1).expand(-1, self.num_frames, -1)
             self.memory_egopose[:, :self.num_propagated]  = self.memory_egopose[:, :self.num_propagated] + (1 - x).view(B, 1, 1, 1) * torch.eye(4, device=x.device)
-        memory_frames = []
-        for i in range(self.num_frames):
-            memory_frames.append(self.memory_reference_point_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
-        self.memory_reference_point_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 3
-        memory_frames = []
-        for i in range(self.num_frames):
-            memory_frames.append(self.memory_velo_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
-        self.memory_velo_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 2
+        if self.forecast_mem_update:
+            memory_frames = []
+            for i in range(self.num_frames):
+                memory_frames.append(self.memory_reference_point_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
+            self.memory_reference_point_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 3
+            if self.with_attn_forecast:
+                memory_frames = []
+                for i in range(self.num_frames):
+                    memory_frames.append(self.memory_velo_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
+                self.memory_velo_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 2
+
     def post_update_memory(self, data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict):
         if self.training and mask_dict and mask_dict['pad_size'] > 0:
             rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
