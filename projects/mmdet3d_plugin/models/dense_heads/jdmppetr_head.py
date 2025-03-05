@@ -199,7 +199,7 @@ class JDMPPETRHead(AnchorFreeHead):
         self.with_forecast_ego_pos = with_forecast_ego_pos
         self.viz_forecast_loss = viz_forecast_loss
         self.assigner_forecast_threshold = assigner_forecast_threshold
-
+        self.num_frames = self.memory_len//self.num_propagated
         self.scalar = scalar
         self.bbox_noise_scale = noise_scale
         self.bbox_noise_trans = noise_trans
@@ -376,12 +376,17 @@ class JDMPPETRHead(AnchorFreeHead):
 
     def reset_memory(self):
         self.memory_embedding = None
-        self.memory_embedding_forecast = None
         self.memory_reference_point = None
         self.memory_timestamp = None
         self.memory_egopose = None
         self.memory_velo = None
         self.memory_rotation = None
+        if self.forecast_mem_update:
+            self.memory_reference_point_forecast = None
+            self.memory_velo_forecast = None
+            self.memory_embedding_forecast = None
+            self.memory_reference_point_forecast_atdet = None
+            self.memory_velo_forecast_atdet = None
 
     def pre_update_memory(self, data):
         x = data['prev_exists']
@@ -389,17 +394,20 @@ class JDMPPETRHead(AnchorFreeHead):
         # refresh the memory when the scene changes
         if self.memory_embedding is None:
             self.memory_embedding = x.new_zeros(B, self.memory_len, self.embed_dims)
-            self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
             self.memory_reference_point = x.new_zeros(B, self.memory_len, 3)
             self.memory_timestamp = x.new_zeros(B, self.memory_len, 1)
             self.memory_egopose = x.new_zeros(B, self.memory_len, 4, 4)
             self.memory_velo = x.new_zeros(B, self.memory_len, 2)
             self.memory_rotation = x.new_zeros(B, self.memory_len, 1)
             self.memory_label = x.new_zeros(B, self.memory_len, 1)
+            if self.forecast_mem_update:
+                self.memory_reference_point_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 3)
+                self.memory_velo_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 2)
+                self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
+                self.memory_reference_point_forecast_atdet = x.new_zeros(B, self.memory_len, 3)
+                self.memory_velo_forecast_atdet = x.new_zeros(B, self.memory_len, 2)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
-            if self.with_attn_forecast and self.forecast_mem_update:
-                self.memory_timestamp[:, :self.num_propagated] = 0
             self.memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
             self.memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
             self.memory_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])
@@ -413,12 +421,30 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
             self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
             self.memory_label = memory_refresh(self.memory_label[:, :self.memory_len], x)
+            if self.forecast_mem_update:
+                self.memory_reference_point_forecast = transform_reference_points(self.memory_reference_point_forecast, data['ego_pose_inv'], reverse=False)
+                if self.memory_vel_transform:
+                    self.memory_velo_forecast = transform_velocity(self.memory_velo_forecast, data['ego_pose_inv'])
+                self.memory_reference_point_forecast = memory_refresh(self.memory_reference_point_forecast[:, :self.memory_len], x)
+                self.memory_embedding_forecast = memory_refresh(self.memory_embedding_forecast[:, :self.memory_len], x)
+                self.memory_velo_forecast = memory_refresh(self.memory_velo_forecast[:, :self.memory_len], x)
         # for the first frame, padding pseudo_reference_points (non-learnable)
         if self.num_propagated > 0:
             pseudo_reference_points = self.pseudo_reference_points.weight * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3]
             self.memory_reference_point[:, :self.num_propagated]  = self.memory_reference_point[:, :self.num_propagated] + (1 - x).view(B, 1, 1) * pseudo_reference_points
+            self.memory_reference_point_forecast[:, :self.num_propagated] = self.memory_reference_point_forecast[:, :self.num_propagated] \
+                + (1 - x).view(B, 1, 1, 1) * pseudo_reference_points.unsqueeze(1).expand(-1, self.num_frames, -1)
+            # self.memory_reference_point_forecast[:, :self.num_propagated, 0] = self.memory_reference_point_forecast[:, :self.num_propagated] \
+            #     + (1 - x).view(B, 1, 1) * pseudo_reference_points
             self.memory_egopose[:, :self.num_propagated]  = self.memory_egopose[:, :self.num_propagated] + (1 - x).view(B, 1, 1, 1) * torch.eye(4, device=x.device)
-
+        memory_frames = []
+        for i in range(self.num_frames):
+            memory_frames.append(self.memory_reference_point_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
+        self.memory_reference_point_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 3
+        memory_frames = []
+        for i in range(self.num_frames):
+            memory_frames.append(self.memory_velo_forecast[:, i*self.num_propagated:(i+1)*self.num_propagated, i, :])
+        self.memory_velo_forecast_atdet = torch.cat(memory_frames, dim=1)  # B, M, 2
     def post_update_memory(self, data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict):
         if self.training and mask_dict and mask_dict['pad_size'] > 0:
             rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
@@ -510,14 +536,20 @@ class JDMPPETRHead(AnchorFreeHead):
 
     def temporal_alignment(self, query_pos, tgt, reference_points):
         B = query_pos.size(0)
-
-        prop_mem_ref_point = self.memory_reference_point.clone()
-        temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-        temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point))
+        if self.forecast_mem_update:
+            prop_mem_ref_point = self.memory_reference_point_forecast_atdet.clone()
+            mem_timestamp = torch.zeros_like(self.memory_timestamp)
+        else:
+            prop_mem_ref_point = self.memory_reference_point.clone()
+            mem_timestamp = self.memory_timestamp
         if self.with_attn_forecast and self.forecast_mem_update:
             temp_memory = self.query_fuser(torch.cat([self.memory_embedding, self.memory_embedding_forecast], dim=-1))
+            mem_velo = self.memory_velo_forecast_atdet
         else:
             temp_memory = self.memory_embedding 
+            mem_velo = self.memory_velo
+        temp_reference_point = (prop_mem_ref_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
+        temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point))
         rec_ego_pose = torch.eye(4, device=query_pos.device).unsqueeze(0).unsqueeze(0).repeat(B, query_pos.size(1), 1, 1)
         
         if self.with_ego_pos:
@@ -525,13 +557,13 @@ class JDMPPETRHead(AnchorFreeHead):
             rec_ego_motion = nerf_positional_encoding(rec_ego_motion)
             tgt = self.ego_pose_memory(tgt, rec_ego_motion)
             query_pos = self.ego_pose_pe(query_pos, rec_ego_motion)
-            memory_ego_motion = torch.cat([self.memory_velo, self.memory_timestamp, self.memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
+            memory_ego_motion = torch.cat([mem_velo, self.memory_timestamp, self.memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
             memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
             temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
             temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
 
         query_pos += self.time_embedding(pos2posemb1d(torch.zeros_like(reference_points[...,:1])))
-        temp_pos += self.time_embedding(pos2posemb1d(self.memory_timestamp).float())
+        temp_pos += self.time_embedding(pos2posemb1d(mem_timestamp).float())
 
         if self.num_propagated > 0:
             tgt = torch.cat([tgt, temp_memory[:, :self.num_propagated]], dim=1)
@@ -543,59 +575,6 @@ class JDMPPETRHead(AnchorFreeHead):
             
         return tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose
     
-
-    # def forecast_alignment(self, data):
-    #     B = data['prev_exists'].size(0)
-    #     A = self.num_propagated
-    #     M = self.num_forecast_modes
-    #     T = self.num_forecast_times
-    #     memory_timestamp = self.memory_timestamp + data['timestamp'].unsqueeze(-1).unsqueeze(-1)
-    #     memory_timestamp *= -1 # Reverse the time for history (negative timestamps)
-    #     memory_egopose = data['ego_pose_inv'].unsqueeze(1) @ self.memory_egopose
-    #     memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
-    #     temp_reference_point = (memory_reference_point - self.pc_range[:3]) / (self.pc_range[3:6] - self.pc_range[0:3])
-    #     forecast_reference_point = temp_reference_point[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, 3)
-    #     if self.forecast_emb_sep:
-    #         temp_pos = self.forecast_query_embedding(pos2posemb3d(temp_reference_point))
-    #         forecast_pos = self.forecast_query_embedding(pos2posemb3d(forecast_reference_point))
-    #     else:
-    #         temp_pos = self.query_embedding(pos2posemb3d(temp_reference_point)) 
-    #         forecast_pos = self.query_embedding(pos2posemb3d(forecast_reference_point))
-    #     temp_memory = self.memory_embedding
-    #     forecast_memory = temp_memory[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).expand(B, A, M, T, temp_memory.size(-1))
-        
-    #     if self.with_forecast_ego_pos:
-    #         memory_ego_motion = torch.cat([self.memory_velo, memory_timestamp, memory_egopose[..., :3, :].flatten(-2)], dim=-1).float()
-    #         memory_ego_motion = nerf_positional_encoding(memory_ego_motion)
-    #         forecast_ego_motion = memory_ego_motion[:, :self.num_propagated].unsqueeze(2).unsqueeze(2).repeat(1, 1, self.num_forecast_modes, self.num_forecast_times, 1)
-    #         if self.forecast_emb_sep:
-    #             temp_pos = self.forecast_ego_pose_pe(temp_pos, memory_ego_motion)
-    #             temp_memory = self.forecast_ego_pose_memory(temp_memory, memory_ego_motion)
-    #             forecast_pos = self.forecast_ego_pose_pe(forecast_pos, forecast_ego_motion)
-    #             forecast_memory = self.forecast_ego_pose_memory(forecast_memory, forecast_ego_motion)
-    #         else:
-    #             temp_pos = self.ego_pose_pe(temp_pos, memory_ego_motion)
-    #             temp_memory = self.ego_pose_memory(temp_memory, memory_ego_motion)
-    #             forecast_pos = self.ego_pose_pe(forecast_pos, forecast_ego_motion)
-    #             forecast_memory = self.ego_pose_memory(forecast_memory, forecast_ego_motion)
-
-    #     forecast_timestamp = torch.arange(0, T, device=memory_timestamp.device).expand(B, A, M, T).unsqueeze(-1).float()
-    #     if self.forecast_emb_sep:
-    #         temp_pos += self.forecast_time_embedding(pos2posemb1d(memory_timestamp).float())
-    #         forecast_pos += self.forecast_time_embedding(pos2posemb1d(forecast_timestamp).float())
-    #     else: 
-    #         temp_pos += self.time_embedding(pos2posemb1d(memory_timestamp).float())
-    #         forecast_pos += self.time_embedding(pos2posemb1d(forecast_timestamp).float())
-
-    #     temp_memory = temp_memory[:, self.num_propagated:]
-    #     temp_memory = torch.zeros_like(temp_memory)
-    #     temp_pos = temp_pos[:, self.num_propagated:]
-    #     forecast_tgt = forecast_memory.reshape(B, -1, forecast_memory.size(-1))
-    #     forecast_tgt = torch.zeros_like(forecast_tgt)
-    #     forecast_pos = forecast_pos.reshape(B, -1, forecast_pos.size(-1))
-    #     forecast_reference_point = forecast_reference_point.reshape(B, -1, forecast_reference_point.size(-1))
-            
-    #     return forecast_tgt, forecast_pos, forecast_reference_point, temp_memory, temp_pos
 
     def map_encoding(self, sample_idx, global2ego_3dpose_matrix, global2det_2dposition, global2det_yaw):
         # Params for map encoding TODO: move to config
@@ -917,6 +896,127 @@ class JDMPPETRHead(AnchorFreeHead):
                                           unexpected_keys, error_msgs)
     
 
+    def prepare_forecast_inputs(self, data, all_bbox_preds, all_cls_scores, outs_dec, mask_dict):
+        """Prepare inputs for forecast transformer.
+        
+        Args:
+            data (dict): Input data dictionary.
+            all_bbox_preds (Tensor): Bbox predictions.
+            all_cls_scores (Tensor): Classification scores.
+            outs_dec (Tensor): Decoder outputs.
+            mask_dict (dict): Dictionary containing mask information for DN.
+            
+        Returns:
+            tuple: Tuple containing detection query, reference pose, reference label,
+                map query, map reference position, and topk_indexes.
+        """
+        if self.forecast_all:
+            self.forecast_transformer.num_propagated = self.num_propagated + self.num_query
+            if self.training and mask_dict and mask_dict['pad_size'] > 0:
+                detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
+                detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
+                detection_reference_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                detection_reference_label = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
+                detection_reference_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
+                detection_reference_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
+                detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
+            else:
+                detection_reference_point = all_bbox_preds[..., :3][-1]
+                detection_query = outs_dec[-1]
+                detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
+                detection_reference_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
+                detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
+                detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
+                detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
+            _, topk_indexes = torch.topk(detection_reference_score, self.topk_proposals, dim=1)
+        else:
+            detection_query = self.memory_embedding[:, :self.num_propagated]
+            detection_reference_label = self.memory_label[:, :self.num_propagated]
+            memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
+            detection_reference_point = memory_reference_point[:, :self.num_propagated]
+            detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
+            topk_indexes = None
+            
+        detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
+        
+        map_query, map_reference_pos = None, None
+        return detection_query, detection_reference_pose, detection_reference_label, detection_reference_point, map_query, map_reference_pos, topk_indexes
+    
+    def prepare_map_inputs(self, img_metas, data, detection_reference_point, detection_reference_pose):
+        """Prepare map inputs for forecast transformer.
+        
+        Args:
+            img_metas (list): List of image meta information.
+            data (dict): Input data dictionary.
+            detection_reference_point (Tensor): Detection reference points.
+            detection_reference_pose (Tensor): Detection reference poses.
+            
+        Returns:
+            tuple: Tuple containing map query and map reference position.
+        """
+        map_query, map_reference_pos = None, None
+        if self.with_map_encoder:
+            detection_reference_rotation = detection_reference_pose[..., 2:3]
+            detection_reference_point_global = transform_reference_points(detection_reference_point, data['ego_pose'], reverse=False)
+            detection_reference_rotation_global = transform_rotations(detection_reference_rotation, data['ego_pose'])
+            sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
+            map_query, map_reference_pos = self.map_encoding(sample_idx, data['ego_pose'], detection_reference_point_global, detection_reference_rotation_global)
+        return map_query, map_reference_pos
+
+    
+    def prepare_simple_forecast(self, N, B, all_bbox_preds, all_cls_scores, mask_dict, topk_indexes=None):
+        """Prepare simple forecast predictions (constant velocity or constant position).
+        
+        Args:
+            N (int): Number of feature levels.
+            B (int): Batch size.
+            all_bbox_preds (Tensor): Bbox predictions.
+            all_cls_scores (Tensor): Classification scores.
+            mask_dict (dict): Dictionary containing mask information for DN.
+            
+        Returns:
+            tuple: Tuple containing forecast predictions, forecast scores, 
+                detection reference points, and topk indexes.
+        """
+        num_future_frames = 12
+        
+        # Get reference points and velocities
+        if self.training and mask_dict and mask_dict['pad_size'] > 0:
+            rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
+            rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:] if self.with_velo_forecast else None
+            rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :].sigmoid().topk(1, dim=-1).values[..., 0:1]
+        else:
+            rec_reference_points = all_bbox_preds[..., :3]
+            rec_velo = all_bbox_preds[..., -2:] if self.with_velo_forecast else None
+            rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
+        
+        # Apply topk filtering if needed
+        if self.with_velo_forecast:
+            if not self.forecast_all:
+                _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
+                rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
+                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
+                rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
+            else:
+                _, topk_indexes = torch.topk(rec_score[-1], self.topk_proposals, dim=1)
+            
+            # Constant velocity forecast
+            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
+            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) + \
+                rec_velo.unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) * pred_dts
+            all_forecast_preds = all_forecast_preds.unsqueeze(3)
+            all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
+            all_forecast_preds = all_forecast_preds[..., 1:, 0:2] - all_forecast_preds[..., 0:1, 0:2]
+        else:
+            # Constant position forecast (zero displacement)
+            all_forecast_preds = torch.zeros((N, B, rec_reference_points.shape[2], 1, num_future_frames, 2), 
+                                            device=rec_reference_points.device)
+            all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
+        
+        detection_reference_point = rec_reference_points[-1]
+        return all_forecast_preds, all_forecast_scores, detection_reference_point, topk_indexes
+
     def forward(self, memory_center, img_metas, topk_indexes=None,  **data):
         """Forward function.
         Args:
@@ -941,9 +1041,7 @@ class JDMPPETRHead(AnchorFreeHead):
         memory = topk_gather(memory, topk_indexes)
 
         pos_embed, cone = self.position_embeding(data, memory_center, topk_indexes, img_metas)
-
         memory = self.memory_embed(memory)
-
         # spatial_alignment in focal petr
         memory = self.spatial_alignment(memory, cone)
         pos_embed = self.featurized_pe(pos_embed, memory)
@@ -956,9 +1054,66 @@ class JDMPPETRHead(AnchorFreeHead):
         # prepare for the tgt and query_pos using mln.
         tgt, query_pos, reference_points, temp_memory, temp_pos, rec_ego_pose = self.temporal_alignment(query_pos, tgt, reference_points)
 
-        # transformer here is a little different from PETR
+        # SteamPETR detection transformer
         outs_dec, _ = self.detect_transformer(memory, tgt, query_pos, pos_embed, attn_mask, temp_memory, temp_pos)
         outs_dec = torch.nan_to_num(outs_dec)
+        all_cls_scores, all_bbox_preds = self.process_decoder_outputs(outs_dec, reference_points)
+        
+        # update the memory bank
+        self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
+        
+        # Attention forecasting
+        self.forecast_all = True        
+        if self.with_attn_forecast:
+            detection_query, detection_reference_pose, detection_reference_label, detection_reference_point, map_query, map_reference_pos, \
+                topk_indexes = self.prepare_forecast_inputs(data, all_bbox_preds, all_cls_scores, outs_dec, mask_dict)            
+            map_query, map_reference_pos = self.prepare_map_inputs(
+                img_metas, data, detection_reference_point, detection_reference_pose)
+            all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(
+                detection_query, detection_reference_pose, detection_reference_label, map_query, map_reference_pos)
+        # Simple forecasting (constant velocity or constant position)
+        else:
+            all_forecast_preds, all_forecast_scores, detection_reference_point, topk_indexes = self.prepare_simple_forecast(
+                N, B, all_bbox_preds, all_cls_scores, mask_dict, topk_indexes)
+
+        # Update memory
+        if self.forecast_mem_update:
+            self.forecast_update_memory(all_forecast_preds, all_forecast_scores, detection_reference_point, 
+                                             data, topk_indexes, all_forecast_query if self.with_attn_forecast else None)
+
+        if mask_dict and mask_dict['pad_size'] > 0:
+            output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
+            output_known_coord = all_bbox_preds[:, :, :mask_dict['pad_size'], :]
+            outputs_class = all_cls_scores[:, :, mask_dict['pad_size']:, :]
+            outputs_coord = all_bbox_preds[:, :, mask_dict['pad_size']:, :]
+            mask_dict['output_known_lbs_bboxes']=(output_known_class, output_known_coord)
+            outs = {
+                'all_cls_scores': outputs_class,
+                'all_bbox_preds': outputs_coord,
+                'dn_mask_dict':mask_dict,
+            }
+        else:
+            outs = {
+                'all_cls_scores': all_cls_scores,
+                'all_bbox_preds': all_bbox_preds,
+                'dn_mask_dict': None,
+            }
+        outs['all_forecast_preds'] = all_forecast_preds
+        outs['all_forecast_scores'] = all_forecast_scores
+        outs['all_forecast_reference_points'] = detection_reference_point
+
+        return outs
+    
+    def process_decoder_outputs(self, outs_dec, reference_points):
+        """Process outputs from decoder.
+        
+        Args:
+            outs_dec (Tensor): Outputs from decoder.
+            reference_points (Tensor): Reference points.
+            
+        Returns:
+            tuple[Tensor, Tensor]: Classification scores and bounding box predictions.
+        """
         outputs_classes = []
         outputs_coords = []
         for lvl in range(outs_dec.shape[0]):
@@ -978,161 +1133,8 @@ class JDMPPETRHead(AnchorFreeHead):
         all_bbox_preds = torch.stack(outputs_coords)
         all_bbox_preds[..., 0:3] = (all_bbox_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
         
-        # update the memory bank
-        self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
-        
-        self.forecast_all = True        
-        if self.with_attn_forecast:
-            if self.forecast_all:
-                self.forecast_transformer.num_propagated = self.num_propagated + self.num_query
-                if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                    detection_reference_point = all_bbox_preds[:, :, mask_dict['pad_size']:, :3][-1]
-                    detection_query = outs_dec[:, :, mask_dict['pad_size']:, :][-1]
-                    detection_reference_score = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
-                    detection_reference_label = all_cls_scores[:, :, mask_dict['pad_size']:, :][-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
-                    detection_reference_rot_sine = all_bbox_preds[:, :, mask_dict['pad_size']:, 6:7][-1]
-                    detection_reference_rot_cosine = all_bbox_preds[:, :, mask_dict['pad_size']:, 7:8][-1]
-                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
-                else:
-                    detection_reference_point = all_bbox_preds[..., :3][-1]
-                    detection_query = outs_dec[-1]
-                    detection_reference_score = all_cls_scores[-1].sigmoid().topk(1, dim=-1).values[..., 0:1]
-                    detection_reference_label = all_cls_scores[-1].sigmoid().topk(1, dim=-1).indices[..., 0:1]
-                    detection_reference_rot_sine = all_bbox_preds[..., 6:7][-1]
-                    detection_reference_rot_cosine = all_bbox_preds[..., 7:8][-1]
-                    detection_reference_rotation = torch.atan2(detection_reference_rot_sine, detection_reference_rot_cosine)
-                _, topk_indexes = torch.topk(detection_reference_score, self.topk_proposals, dim=1)
-            else:
-                detection_query = self.memory_embedding[:, :self.num_propagated]
-                detection_reference_label = self.memory_label[:, :self.num_propagated]
-                memory_reference_point = transform_reference_points(self.memory_reference_point, data['ego_pose_inv'], reverse=False)
-                detection_reference_point = memory_reference_point[:, :self.num_propagated]
-                detection_reference_rotation = transform_rotations(self.memory_rotation, data['ego_pose_inv'])[:, :self.num_propagated]
-            detection_reference_pose = torch.cat([detection_reference_point[...,:2], detection_reference_rotation], dim=-1)
-            if self.with_map_encoder:
-                detection_reference_point_global = transform_reference_points(detection_reference_point, data['ego_pose'], reverse=False)
-                detection_reference_rotation_global = transform_rotations(detection_reference_rotation, data['ego_pose'])
-                sample_idx = [img_meta['sample_idx'] for img_meta in img_metas]
-                map_query, map_reference_pos = self.map_encoding(sample_idx, data['ego_pose'], detection_reference_point_global, detection_reference_rotation_global)
-                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, detection_reference_label, map_query, map_reference_pos)
-            else:
-                all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(detection_query, detection_reference_pose, detection_reference_label)
-            # Prepare for forecasting
-            # forecast_tgt, forecast_query_pos, forecast_reference_points, forecast_temp_memory, \
-            #     forecast_temp_pos = self.forecast_alignment(data)
-            # attn_mask_block = torch.ones(self.num_forecast_times, self.num_forecast_times, dtype=torch.uint8, device=forecast_tgt.device)
-            # identity = torch.eye(self.num_propagated*self.num_forecast_modes, dtype=torch.uint8, device=forecast_tgt.device)
-            # forecast_attn_mask = torch.kron(identity,attn_mask_block).to(forecast_tgt.device) == 0
-            # # forecast_attn_mask = None
+        return all_cls_scores, all_bbox_preds
 
-            # # Forecasting
-            # outs_forecast_dec = self.forecast_transformer(forecast_tgt, forecast_query_pos, forecast_attn_mask)
-            # outs_forecast_dec = torch.nan_to_num(outs_forecast_dec)
-            # outputs_forecast_coords = []
-            # for lvl in range(outs_forecast_dec.shape[0]):
-            #     reference = inverse_sigmoid(forecast_reference_points.clone())
-            #     assert reference.shape[-1] == 3
-            #     tmp = self.forecast_reg_branches[lvl](outs_forecast_dec[lvl])
-
-            #     tmp[..., 0:3] += reference
-            #     tmp[..., 0:3] = tmp[..., 0:3].sigmoid()
-
-            #     outputs_forecast_coord = tmp
-            #     outputs_forecast_coords.append(outputs_forecast_coord)
-
-            # all_forecast_preds = torch.stack(outputs_forecast_coords)
-            # all_forecast_preds[..., 0:3] = (all_forecast_preds[..., 0:3] * (self.pc_range[3:6] - self.pc_range[0:3]) + self.pc_range[0:3])
-            # all_forecast_preds = all_forecast_preds.reshape(outs_forecast_dec.shape[0], B, self.num_propagated, self.num_forecast_times, all_forecast_preds.shape[-1])
-            # TODO: add mode to reshape above and below
-
-        elif self.with_velo_forecast:
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
-                rec_velo = all_bbox_preds[:, :, mask_dict['pad_size']:, -2:]
-                rec_score = all_cls_scores[:, :, mask_dict['pad_size']:, :].sigmoid().topk(1, dim=-1).values[..., 0:1]
-            else:
-                rec_reference_points = all_bbox_preds[..., :3]
-                rec_velo = all_bbox_preds[..., -2:]
-                rec_score = all_cls_scores.sigmoid().topk(1, dim=-1).values[..., 0:1]
-            if not self.forecast_all:
-                _, topk_indexes = torch.topk(rec_score, self.topk_proposals, dim=2)
-                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_reference_points.shape[-1])
-                rec_reference_points = torch.gather(rec_reference_points, 2, topk_indexes_expanded)
-                topk_indexes_expanded = topk_indexes.expand(-1, -1, -1, rec_velo.shape[-1])
-                rec_velo = torch.gather(rec_velo, 2, topk_indexes_expanded)
-            else:
-                _, topk_indexes = torch.topk(rec_score[-1], self.topk_proposals, dim=1)
-            # rec_velo = torch.nn.functional.pad(rec_velo, (0,1))
-            # all_forecast_preds = rec_reference_points + rec_velo * 0.5
-            num_future_frames = 12
-            pred_dts = 0.5*torch.arange(0, num_future_frames + 1, device=rec_reference_points.device).float().unsqueeze(0).unsqueeze(0).unsqueeze(0).unsqueeze(-1)
-            all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) + \
-                rec_velo.unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) * pred_dts
-            # all_forecast_preds = rec_reference_points[..., :2].unsqueeze(-2).repeat(1, 1, 1, num_future_frames + 1, 1) # Stationary forecast
-            # TODO: check how this affects loss computation
-            all_forecast_preds = all_forecast_preds.unsqueeze(3)
-            all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
-            detection_reference_point = rec_reference_points[-1]
-            all_forecast_preds = all_forecast_preds[..., 1:, 0:2] - all_forecast_preds[..., 0:1, 0:2]
-        else:
-            num_future_frames = 12
-            if self.training and mask_dict and mask_dict['pad_size'] > 0:
-                rec_reference_points = all_bbox_preds[:, :, mask_dict['pad_size']:, :3]
-            else:
-                rec_reference_points = all_bbox_preds[..., :3]
-            all_forecast_preds = torch.zeros((N, B, rec_reference_points.shape[2], 1, num_future_frames, 2), device=rec_reference_points.device)
-            all_forecast_scores = torch.ones_like(all_forecast_preds[..., 0:1, 0])
-            detection_reference_point = rec_reference_points[-1]
-        if self.forecast_mem_update and (self.with_velo_forecast or self.with_attn_forecast):
-            max_indices = torch.argmax(all_forecast_scores[-1], dim=2, keepdim=True)  # Shape: [8, 128, 1, 1]
-            max_indices = max_indices.expand(-1, -1, -1, 2)  # Shape: [8, 128, 1, 2]
-            selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,0,:2], dim=2, index=max_indices).squeeze(2)  # Shape: [8, 128, 2]
-            selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)
-            forecast_points = selected_preds + detection_reference_point
-            forecast_points = transform_reference_points(forecast_points, data['ego_pose'], reverse=False)
-            if self.forecast_all:
-                topk_indexes_expanded = topk_indexes.expand(-1, -1, forecast_points.shape[-1])
-                forecast_points = torch.gather(forecast_points, 1, topk_indexes_expanded)
-                topk_indexes_expanded = topk_indexes.expand(-1, -1, selected_preds.shape[-1])
-                selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
-            self.memory_reference_point[:, :self.num_propagated] = forecast_points.detach().clone()
-            self.memory_velo[:, :self.num_propagated] = selected_preds[...,:2].detach().clone()
-            if self.with_attn_forecast: 
-                forecast_query = all_forecast_query[-1].detach().clone() # [8, 428, 18, 256]
-                forecast_scores_squeezed = all_forecast_scores[-1].squeeze(-1)  # Shape: [8, 428, 18]
-                _, max_indices = torch.max(forecast_scores_squeezed, dim=2)  # max_indices shape: [8, 428]
-                max_indices_expanded = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [8, 428, 1, 1]
-                max_indices_expanded = max_indices_expanded.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [8, 428, 1, 256]
-                forecast_query = torch.gather(forecast_query, dim=2, index=max_indices_expanded)  # Shape: [8, 428, 1, 256]
-                forecast_query = forecast_query.squeeze(2)  # Final shape: [8, 428, 256]
-                expanded_topk_indexes = topk_indexes.expand(-1, -1, forecast_query.size(2)) # [8, 128, 256]
-                forecast_query = torch.gather(forecast_query, dim=1, index=expanded_topk_indexes) # [8, 128, 256]
-                self.memory_embedding_forecast = torch.cat([forecast_query.detach().clone(), self.memory_embedding_forecast], dim=1)
-
-        if mask_dict and mask_dict['pad_size'] > 0:
-            output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
-            output_known_coord = all_bbox_preds[:, :, :mask_dict['pad_size'], :]
-            outputs_class = all_cls_scores[:, :, mask_dict['pad_size']:, :]
-            outputs_coord = all_bbox_preds[:, :, mask_dict['pad_size']:, :]
-            mask_dict['output_known_lbs_bboxes']=(output_known_class, output_known_coord)
-            outs = {
-                'all_cls_scores': outputs_class,
-                'all_bbox_preds': outputs_coord,
-                'dn_mask_dict':mask_dict,
-
-            }
-        else:
-            outs = {
-                'all_cls_scores': all_cls_scores,
-                'all_bbox_preds': all_bbox_preds,
-                'dn_mask_dict': None,
-            }
-        outs['all_forecast_preds'] = all_forecast_preds
-        outs['all_forecast_scores'] = all_forecast_scores
-        outs['all_forecast_reference_points'] = detection_reference_point
-
-        return outs
-    
     def prepare_for_loss(self, mask_dict):
         """
         prepare dn components to calculate loss
@@ -1539,7 +1541,7 @@ class JDMPPETRHead(AnchorFreeHead):
         # classification loss
         cls_scores = cls_scores.reshape(-1, self.cls_out_channels)
         # construct weighted avg_factor to match with the official DETR repo
-        cls_avg_factor = num_total_pos * 3.14159 / 6 * self.split * self.split  * self.split ### positive rate
+        cls_avg_factor = num_total_pos * 3.14159 / 6 * self.split * self.split * self.split ### positive rate
         if self.sync_cls_avg_factor:
             cls_avg_factor = reduce_mean(
                 cls_scores.new_tensor([cls_avg_factor]))
@@ -1796,3 +1798,58 @@ class JDMPPETRHead(AnchorFreeHead):
                 'scores_2d': topk_forecast_scores[i],
             }})
         return ret_list
+
+    def forecast_update_memory(self, all_forecast_preds, all_forecast_scores, detection_reference_point, 
+                                    data, topk_indexes, all_forecast_query=None):
+        """Update memory bank with forecast predictions.
+        
+        Args:
+            all_forecast_preds (Tensor): Forecast trajectory predictions.
+            all_forecast_scores (Tensor): Forecast trajectory scores.
+            detection_reference_point (Tensor): Reference points for detections.
+            data (dict): Input data dictionary.
+            topk_indexes (Tensor): Indices of top-k proposals.
+            all_forecast_query (Tensor, optional): Forecast query features.
+        """
+        # Get best forecast modes
+        forecast_scores_squeezed = all_forecast_scores[-1].squeeze(-1)  # Shape: [B, N, M]
+        _, max_indices = torch.max(forecast_scores_squeezed, dim=2)  # max_indices shape: [B, N]
+        
+        # Select best trajectory predictions
+        max_indices_for_preds = max_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1, 1]
+        max_indices_for_preds = max_indices_for_preds.expand(-1, -1, -1, self.num_frames+1, 2)  # Shape: [B, N, 1, F+1, 2]
+        selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,:self.num_frames+1,:2], dim=2, 
+                                      index=max_indices_for_preds).squeeze(2)  # Shape: [B, N, F+1, 2]
+        if self.with_attn_forecast:
+            velo_points = torch.cat([torch.zeros_like(selected_preds[:, :, 0:1, :]), selected_preds], dim=2)  # Shape: [B, N, F+2, 2]
+            forecast_velo = velo_points[:, :, 2:] - velo_points[:, :, :-2]  # Shape: [B, N, F, 2]
+        selected_preds = selected_preds[:, :, :-1, :]  # Shape: [B, N, F, 3]
+        selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)  # Shape: [B, N, F, 3]
+        forecast_points = selected_preds + detection_reference_point.unsqueeze(2).expand(-1, -1, self.num_frames, -1)  # Shape: [B, N, F, 3]
+
+        # Select best forecast query features
+        if self.with_attn_forecast:
+            forecast_query = all_forecast_query[-1].detach().clone()  # [B, N, M, C]
+            max_indices_for_query = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1]
+            max_indices_for_query = max_indices_for_query.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [B, N, 1, C]
+            forecast_query = torch.gather(forecast_query, dim=2, index=max_indices_for_query).squeeze(2)  # Shape: [B, N, C]
+
+        # Get topk detections if needed
+        if self.forecast_all:
+            topk_indexes_expanded = topk_indexes.unsqueeze(-1).expand(-1, -1, forecast_points.shape[-2], forecast_points.shape[-1])
+            forecast_points = torch.gather(forecast_points, 1, topk_indexes_expanded)
+            topk_indexes_expanded = topk_indexes.unsqueeze(-1).expand(-1, -1, selected_preds.shape[-2], selected_preds.shape[-1])
+            selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
+            if forecast_query is not None:
+                expanded_topk_indexes = topk_indexes.expand(-1, -1, forecast_query.size(2))  # [B, K, C]
+                forecast_query = torch.gather(forecast_query, dim=1, index=expanded_topk_indexes)  # [B, K, C]
+
+        # Update memory bank
+        self.memory_reference_point_forecast = torch.cat([forecast_points.detach().clone(), self.memory_reference_point_forecast], dim=1)
+        self.memory_reference_point_forecast = transform_reference_points(self.memory_reference_point_forecast, data['ego_pose'], reverse=False)
+        if self.with_attn_forecast:
+            self.memory_embedding_forecast = torch.cat([forecast_query.detach().clone(), self.memory_embedding_forecast], dim=1)
+            self.memory_velo_forecast = torch.cat([forecast_velo.detach().clone(), self.memory_velo_forecast], dim=1)
+            if self.memory_vel_transform:
+                self.memory_velo_forecast = transform_velocity(self.memory_velo_forecast, data['ego_pose'])
+        
