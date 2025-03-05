@@ -418,7 +418,6 @@ class JDMPPETRHead(AnchorFreeHead):
             self.memory_timestamp = memory_refresh(self.memory_timestamp[:, :self.memory_len], x)
             self.memory_reference_point = memory_refresh(self.memory_reference_point[:, :self.memory_len], x)
             self.memory_embedding = memory_refresh(self.memory_embedding[:, :self.memory_len], x)
-            self.memory_embedding_forecast = memory_refresh(self.memory_embedding_forecast[:, :self.memory_len], x)
             self.memory_egopose = memory_refresh(self.memory_egopose[:, :self.memory_len], x)
             self.memory_velo = memory_refresh(self.memory_velo[:, :self.memory_len], x)
             self.memory_rotation = memory_refresh(self.memory_rotation[:, :self.memory_len], x)
