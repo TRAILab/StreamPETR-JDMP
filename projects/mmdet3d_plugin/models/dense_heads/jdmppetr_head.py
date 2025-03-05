@@ -1840,7 +1840,7 @@ class JDMPPETRHead(AnchorFreeHead):
             forecast_points = torch.gather(forecast_points, 1, topk_indexes_expanded)
             topk_indexes_expanded = topk_indexes.unsqueeze(-1).expand(-1, -1, selected_preds.shape[-2], selected_preds.shape[-1])
             selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
-            if forecast_query is not None:
+            if self.with_attn_forecast:
                 expanded_topk_indexes = topk_indexes.expand(-1, -1, forecast_query.size(2))  # [B, K, C]
                 forecast_query = torch.gather(forecast_query, dim=1, index=expanded_topk_indexes)  # [B, K, C]
 
