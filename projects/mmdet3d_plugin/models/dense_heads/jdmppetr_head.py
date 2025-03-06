@@ -406,7 +406,7 @@ class JDMPPETRHead(AnchorFreeHead):
                 self.memory_reference_point_forecast_atdet = x.new_zeros(B, self.memory_len, 3)
                 if self.with_attn_forecast:
                     self.memory_velo_forecast = x.new_zeros(B, self.memory_len, self.num_frames, 2)
-                    self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, self.embed_dims)
+                    self.memory_embedding_forecast = x.new_zeros(B, self.memory_len, 2*self.embed_dims)
                     self.memory_velo_forecast_atdet = x.new_zeros(B, self.memory_len, 2)
         else:
             self.memory_timestamp += data['timestamp'].unsqueeze(-1).unsqueeze(-1)
@@ -547,7 +547,7 @@ class JDMPPETRHead(AnchorFreeHead):
             prop_mem_ref_point = self.memory_reference_point.clone()
             mem_timestamp = self.memory_timestamp
         if self.with_attn_forecast and self.forecast_mem_update:
-            temp_memory = self.query_fuser(torch.cat([self.memory_embedding, self.memory_embedding_forecast], dim=-1))
+            temp_memory = self.query_fuser(self.memory_embedding_forecast)
             mem_velo = self.memory_velo_forecast_atdet
         else:
             temp_memory = self.memory_embedding 
@@ -1066,24 +1066,26 @@ class JDMPPETRHead(AnchorFreeHead):
         # update the memory bank
         self.post_update_memory(data, rec_ego_pose, all_cls_scores, all_bbox_preds, outs_dec, mask_dict)
         
-        # Attention forecasting
+        
         self.forecast_all = True        
         if self.with_attn_forecast:
+            # Attention forecasting
             detection_query, detection_reference_pose, detection_reference_label, detection_reference_point, map_query, map_reference_pos, \
                 topk_indexes = self.prepare_forecast_inputs(data, all_bbox_preds, all_cls_scores, outs_dec, mask_dict)            
             map_query, map_reference_pos = self.prepare_map_inputs(
                 img_metas, data, detection_reference_point, detection_reference_pose)
             all_forecast_preds, all_forecast_scores, all_forecast_query = self.forecast_transformer(
-                detection_query, detection_reference_pose, detection_reference_label, map_query, map_reference_pos)
-        # Simple forecasting (constant velocity or constant position)
+                detection_query, detection_reference_pose, detection_reference_label, map_query, map_reference_pos)            
         else:
+            # Simple forecasting (constant velocity or constant position)
             all_forecast_preds, all_forecast_scores, detection_reference_point, topk_indexes = self.prepare_simple_forecast(
                 N, B, all_bbox_preds, all_cls_scores, mask_dict, topk_indexes)
+            all_forecast_query = None
 
         # Update memory
         if self.forecast_mem_update:
             self.forecast_update_memory(all_forecast_preds, all_forecast_scores, detection_reference_point, 
-                                             data, topk_indexes, all_forecast_query if self.with_attn_forecast else None)
+                                        data, topk_indexes, all_forecast_query, detection_query)
 
         if mask_dict and mask_dict['pad_size'] > 0:
             output_known_class = all_cls_scores[:, :, :mask_dict['pad_size'], :]
@@ -1804,7 +1806,7 @@ class JDMPPETRHead(AnchorFreeHead):
         return ret_list
 
     def forecast_update_memory(self, all_forecast_preds, all_forecast_scores, detection_reference_point, 
-                                    data, topk_indexes, all_forecast_query=None):
+                                    data, topk_indexes, all_forecast_query=None, det_query=None):
         """Update memory bank with forecast predictions.
         
         Args:
@@ -1814,39 +1816,61 @@ class JDMPPETRHead(AnchorFreeHead):
             data (dict): Input data dictionary.
             topk_indexes (Tensor): Indices of top-k proposals.
             all_forecast_query (Tensor, optional): Forecast query features.
+            mask_dict (dict, optional): Mask dictionary.
         """
-        # Get best forecast modes
-        forecast_scores_squeezed = all_forecast_scores[-1].squeeze(-1)  # Shape: [B, N, M]
-        _, max_indices = torch.max(forecast_scores_squeezed, dim=2)  # max_indices shape: [B, N]
-        
-        # Select best trajectory predictions
-        max_indices_for_preds = max_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1, 1]
-        max_indices_for_preds = max_indices_for_preds.expand(-1, -1, -1, self.num_frames+1, 2)  # Shape: [B, N, 1, F+1, 2]
-        selected_preds = torch.gather(all_forecast_preds[-1,:,:,:,:self.num_frames+1,:2], dim=2, 
-                                      index=max_indices_for_preds).squeeze(2)  # Shape: [B, N, F+1, 2]
+        # Get forecast predictions from last layer
+        forecast_scores = all_forecast_scores[-1].squeeze(-1)  # Shape: [B, N, M]
+        forecast_preds = all_forecast_preds[-1,...,:2]  # Shape: [B, N, M, T, 2]
+        forecast_reference_points = detection_reference_point # Shape: [B, N, 3]
+        B, N, M, T, _ = forecast_preds.shape
         if self.with_attn_forecast:
-            velo_points = torch.cat([torch.zeros_like(selected_preds[:, :, 0:1, :]), selected_preds], dim=2)  # Shape: [B, N, F+2, 2]
-            forecast_velo = velo_points[:, :, 2:] - velo_points[:, :, :-2]  # Shape: [B, N, F, 2]
-        selected_preds = selected_preds[:, :, :-1, :]  # Shape: [B, N, F, 3]
-        selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)  # Shape: [B, N, F, 3]
-        forecast_points = selected_preds + detection_reference_point.unsqueeze(2).expand(-1, -1, self.num_frames, -1)  # Shape: [B, N, F, 3]
+            forecast_query = all_forecast_query[-1]  # Shape: [B, N, M, C]
+            det_query = det_query.unsqueeze(2).expand(-1, -1, M, -1) # Shape: [B, N, M, C]
+            forecast_query = torch.cat([det_query, forecast_query], dim=-1) # Shape: [B, N, M, 2C]
 
-        # Select best forecast query features
-        if self.with_attn_forecast:
-            forecast_query = all_forecast_query[-1].detach().clone()  # [B, N, M, C]
-            max_indices_for_query = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1]
-            max_indices_for_query = max_indices_for_query.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [B, N, 1, C]
-            forecast_query = torch.gather(forecast_query, dim=2, index=max_indices_for_query).squeeze(2)  # Shape: [B, N, C]
-
-        # Get topk detections if needed
+        # Get topk of N detections if needed
         if self.forecast_all:
-            topk_indexes_expanded = topk_indexes.unsqueeze(-1).expand(-1, -1, forecast_points.shape[-2], forecast_points.shape[-1])
-            forecast_points = torch.gather(forecast_points, 1, topk_indexes_expanded)
-            topk_indexes_expanded = topk_indexes.unsqueeze(-1).expand(-1, -1, selected_preds.shape[-2], selected_preds.shape[-1])
-            selected_preds = torch.gather(selected_preds, 1, topk_indexes_expanded)
+            forecast_preds = torch.gather(forecast_preds, 1, topk_indexes.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, M, T, 2))
+            forecast_reference_points = torch.gather(forecast_reference_points, 1, topk_indexes.expand(-1, -1, 3))
+            forecast_scores = torch.gather(forecast_scores, 1, topk_indexes.expand(-1, -1, M))
             if self.with_attn_forecast:
-                expanded_topk_indexes = topk_indexes.expand(-1, -1, forecast_query.size(2))  # [B, K, C]
-                forecast_query = torch.gather(forecast_query, dim=1, index=expanded_topk_indexes)  # [B, K, C]
+                forecast_query = torch.gather(forecast_query, dim=1, index=topk_indexes.unsqueeze(-1).expand(-1, -1, M, forecast_query.size(3)))
+            N = forecast_preds.shape[1]
+
+        # Select best trajectory indices (top 1 of M or top M of N*M)
+        best = "topk"
+        if best == "max":
+            _, max_indices = torch.max(forecast_scores, dim=2)  # max_indices shape: [B, N]
+        elif best == "topk":
+            flattened_scores = forecast_scores.reshape(B, -1)
+            _, flat_indices = torch.topk(flattened_scores, N, dim=1)  # Shape: [B, N]
+            det_indices = torch.div(flat_indices, M, rounding_mode='floor')  # Shape: [B, N]
+            mode_indices = flat_indices % M  # Shape: [B, N]
+
+        # Get best forecast points and velocities
+        if best == "max":
+            max_indices_for_preds = max_indices.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1, 1]
+            max_indices_for_preds = max_indices_for_preds.expand(-1, -1, -1, T, 2)  # Shape: [B, N, 1, T, 2]
+            selected_preds = torch.gather(forecast_preds, dim=2, index=max_indices_for_preds).squeeze(2)  # Shape: [B, N, T, 2]
+        elif best == "topk":
+            selected_preds = [forecast_preds[b, det_indices[b], mode_indices[b], :, :2] for b in range(B)]  # Shape: [B, N, T, 2]
+            selected_preds = torch.stack(selected_preds, dim=0)  # Shape: [B, N, T, 2]
+        if self.with_attn_forecast:
+            velo_points = torch.cat([torch.zeros_like(selected_preds[:, :, 0:1, :]), selected_preds], dim=2)  # Shape: [B, N, T+1, 2]
+            forecast_velo = velo_points[:, :, 2:self.num_frames+2] - velo_points[:, :, :self.num_frames]  # Shape: [B, N, F, 2]
+        selected_preds = selected_preds[:, :, :self.num_frames, :]  # Shape: [B, N, F, 2]
+        selected_preds = torch.cat([selected_preds, torch.zeros_like(selected_preds[..., 0:1])], dim=-1)  # Shape: [B, N, F, 3]
+        forecast_points = selected_preds + forecast_reference_points.unsqueeze(2).expand(-1, -1, self.num_frames, -1)  # Shape: [B, N, F, 3]
+
+        # Get best forecast query features
+        if self.with_attn_forecast:
+            if best == "max":
+                max_indices_for_query = max_indices.unsqueeze(-1).unsqueeze(-1)  # Shape: [B, N, 1, 1]
+                max_indices_for_query = max_indices_for_query.expand(-1, -1, 1, forecast_query.size(3))  # Shape: [B, N, 1, C]
+                forecast_query = torch.gather(forecast_query, dim=2, index=max_indices_for_query).squeeze(2)  # Shape: [B, N, C]
+            elif best == "topk":
+                forecast_query = [forecast_query[b, det_indices[b], mode_indices[b], :] for b in range(B)]  # Shape: [B, N, C]
+                forecast_query = torch.stack(forecast_query, dim=0)  # Shape: [B, N, C]
 
         # Update memory bank
         self.memory_reference_point_forecast = torch.cat([forecast_points.detach().clone(), self.memory_reference_point_forecast], dim=1)
