@@ -367,7 +367,7 @@ class DetectionMotionBox_modified(DetectionMotionBox):
         )
 
 
-def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbose: bool = False, category_convert_type='detection_category', conf_thresh=0.4) \
+def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbose: bool = False, category_convert_type='detection_category', conf_thresh=0.4, seconds=6) \
         -> Tuple[EvalBoxes, Dict]:
     """
     Loads object predictions from file.
@@ -391,7 +391,12 @@ def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbos
     # Deserialize results and get meta data.
     all_results = EvalBoxes.deserialize(data['results'], box_cls)
     meta = data['meta']
-
+    # change traj to 6 steps
+    if seconds < 6:
+        for sample_token in all_results.sample_tokens:
+            for i in range(len(all_results.boxes[sample_token])):
+                for j in range(len(all_results.boxes[sample_token][i].traj)):
+                    all_results.boxes[sample_token][i].traj[j] = all_results.boxes[sample_token][i].traj[j][:seconds*2]
     # Filter predictions based on confidence threshold
     for sample_token in all_results.sample_tokens:
         all_results.boxes[sample_token] = [
@@ -409,7 +414,7 @@ def load_prediction(result_path: str, max_boxes_per_sample: int, box_cls, verbos
     
     return all_results, meta
 
-def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, category_convert_type='detection_category'):
+def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, category_convert_type='detection_category', seconds=6):
     """
     Loads ground truth boxes from DB.
     :param nusc: A NuScenes instance.
@@ -502,7 +507,7 @@ def load_gt(nusc: NuScenes, eval_split: str, box_cls, verbose: bool = False, cat
                 else:
                     raise Exception('Error: GT annotations must not have more than one attribute!')
                 instance_token = nusc.get('sample_annotation', sample_annotation['token'])['instance_token']
-                fut_traj_local = predict_helper.get_future_for_agent(instance_token, sample_token, seconds=6, in_agent_frame=True)
+                fut_traj_local = predict_helper.get_future_for_agent(instance_token, sample_token, seconds=seconds, in_agent_frame=True)
                 fut_traj_scence_centric = np.zeros((0,))
                 if fut_traj_local.shape[0] > 0:
                     _, boxes, _ = nusc.get_sample_data(sample['data']['LIDAR_TOP'], selected_anntokens=[sample_annotation['token']])

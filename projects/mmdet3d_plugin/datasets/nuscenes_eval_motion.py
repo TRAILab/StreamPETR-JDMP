@@ -360,7 +360,9 @@ class MotionEval(NuScenesEval):
                  eval_mask=False,
                  data_infos=None,
                  category_convert_type='motion_category',
-                 ):
+                 conf_thresh=0.4,
+                 future_seconds=6,
+                 deteval_range=None):
         """
         Initialize a DetectionEval object.
         :param nusc: A NuScenes object.
@@ -380,7 +382,9 @@ class MotionEval(NuScenesEval):
         self.overlap_test = overlap_test
         self.eval_mask = eval_mask
         self.data_infos = data_infos
-        self.conf_thresh = 0.4
+        self.conf_thresh = conf_thresh
+        self.future_seconds = future_seconds
+        self.deteval_range = deteval_range
         # Check result file exists.
         assert os.path.exists(
             result_path), 'Error: The result file does not exist!'
@@ -396,13 +400,14 @@ class MotionEval(NuScenesEval):
         if verbose:
             print('Initializing nuScenes detection evaluation')
         self.pred_boxes, self.meta = load_prediction(self.result_path, self.cfg.max_boxes_per_sample, DetectionMotionBox,
-                                                     verbose=verbose, category_convert_type=category_convert_type, conf_thresh=self.conf_thresh)
+                                                     verbose=verbose, category_convert_type=category_convert_type, conf_thresh=self.conf_thresh, seconds=self.future_seconds)
         self.gt_boxes = load_gt(
             self.nusc,
             self.eval_set,
             DetectionMotionBox_modified,
             verbose=verbose,
-            category_convert_type=category_convert_type)
+            category_convert_type=category_convert_type,
+            seconds=self.future_seconds)
 
         assert set(self.pred_boxes.sample_tokens) == set(self.gt_boxes.sample_tokens), \
             "Samples in split doesn't match samples in predictions."
@@ -417,10 +422,16 @@ class MotionEval(NuScenesEval):
             print('Filtering predictions')
         self.pred_boxes = filter_eval_boxes(
             nusc, self.pred_boxes, self.cfg.class_range, verbose=verbose)
+        if self.deteval_range is not None:
+            for ind, sample_token in enumerate(self.pred_boxes.sample_tokens):
+                self.pred_boxes.boxes[sample_token] = [box for box in self.pred_boxes.boxes[sample_token] if abs(box.ego_translation[0]) < self.deteval_range[0] and abs(box.ego_translation[1]) < self.deteval_range[1]]
         if verbose:
             print('Filtering ground truth annotations')
         self.gt_boxes = filter_eval_boxes(
             nusc, self.gt_boxes, self.cfg.class_range, verbose=verbose)
+        if self.deteval_range is not None:
+            for ind, sample_token in enumerate(self.gt_boxes.sample_tokens):
+                self.gt_boxes.boxes[sample_token] = [box for box in self.gt_boxes.boxes[sample_token] if abs(box.ego_translation[:2][0]) < self.deteval_range[0] and abs(box.ego_translation[:2][1]) < self.deteval_range[1]]
 
         if self.overlap_test:
             self.pred_boxes = filter_eval_boxes_by_overlap(
@@ -744,81 +755,6 @@ def print_traj_metrics(metrics):
         x.add_row(row_data)
     print(x)
 
-
-if __name__ == "__main__":
-
-    # Settings.
-    parser = argparse.ArgumentParser(
-        description='Evaluate nuScenes detection results.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument(
-        'result_path',
-        type=str,
-        help='The submission as a JSON file.')
-    parser.add_argument(
-        '--output_dir',
-        type=str,
-        default='~/nuscenes-metrics',
-        help='Folder to store result metrics, graphs and example visualizations.')
-    parser.add_argument(
-        '--eval_set',
-        type=str,
-        default='val',
-        help='Which dataset split to evaluate on, train, val or test.')
-    parser.add_argument('--dataroot', type=str, default='data/nuscenes',
-                        help='Default nuScenes data directory.')
-    parser.add_argument(
-        '--version',
-        type=str,
-        default='v1.0-trainval',
-        help='Which version of the nuScenes dataset to evaluate on, e.g. v1.0-trainval.')
-    parser.add_argument(
-        '--config_path',
-        type=str,
-        default='',
-        help='Path to the configuration file.'
-        'If no path given, the CVPR 2019 configuration will be used.')
-    parser.add_argument(
-        '--plot_examples',
-        type=int,
-        default=0,
-        help='How many example visualizations to write to disk.')
-    parser.add_argument('--render_curves', type=int, default=1,
-                        help='Whether to render PR and TP curves to disk.')
-    parser.add_argument('--verbose', type=int, default=1,
-                        help='Whether to print to stdout.')
-    args = parser.parse_args()
-
-    result_path_ = os.path.expanduser(args.result_path)
-    output_dir_ = os.path.expanduser(args.output_dir)
-    eval_set_ = args.eval_set
-    dataroot_ = args.dataroot
-    version_ = args.version
-    config_path = args.config_path
-    plot_examples_ = args.plot_examples
-    render_curves_ = bool(args.render_curves)
-    verbose_ = bool(args.verbose)
-
-    if config_path == '':
-        cfg_ = config_factory('detection_cvpr_2019')
-    else:
-        with open(config_path, 'r') as _f:
-            cfg_ = DetectionConfig.deserialize(json.load(_f))
-
-    nusc_ = NuScenes(version=version_, verbose=verbose_, dataroot=dataroot_)
-    nusc_eval = MotionEval(
-        nusc_,
-        config=cfg_,
-        result_path=result_path_,
-        eval_set=eval_set_,
-        output_dir=output_dir_,
-        verbose=verbose_)
-    for vis in ['1', '2', '3', '4']:
-        nusc_eval.update_gt(type_='vis', visibility=vis)
-        print(f'================ {vis} ===============')
-        nusc_eval.main(
-            plot_examples=plot_examples_,
-            render_curves=render_curves_)
 
 def traj_fde(gt_box, pred_box, final_step):
     if gt_box.traj.shape[0] <= 0:

@@ -41,10 +41,19 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.num_frame_losses = num_frame_losses
         self.seq_mode = seq_mode
         self.forecast_match_threshold = 1 # Match threshold for forecast
-        self.eval_mod = eval_mod # Note: if 'viz' is in eval_mod, then no evaluations will be done
-        eval_mod_all = ['viz', 'detection', 'detection_ext', 'forecast', 'forecast_uniad']
+        self.forecast_classes = ['car', 'truck', 'bus', 'trailer', 'motorcycle', 'bicycle', 'pedestrian'] # Filter classes for forecast eval
+        self.eval_mod =  ['detection', 'forecast', 'forecast_uniad'] # Evaluation vizualization and metrics
+        self.detection_conf_thresh = None # Result filtering detection confidence threshold
+        self.foreval_detection_conf_thresh = 0.4 # Forecast evaluation detection confidence threshold
+        self.foreval_future_seconds = 6 # Forecast evaluation future seconds
+        self.deteval_range = None # Detection evaluation rectangular range (m), overwrites default circular range, ex [30,15]
         for mod in self.eval_mod:
-            assert mod in eval_mod_all, f"Invalid evaluation metric: {mod}"
+            assert mod in ['viz', 'detection', 'detection_ext', 'forecast', 'forecast_uniad'], f"Invalid evaluation metric: {mod}"
+        if self.deteval_range is not None:
+            assert len(self.deteval_range) == 2, "deteval_range must be a list of two values"
+            assert self.deteval_range[0] >= self.deteval_range[1], "deteval_range[0] must be greater than deteval_range[1]"
+            for cls in self.eval_detection_configs.class_range.keys():
+                self.eval_detection_configs.class_range[cls] = self.deteval_range[0] 
         if seq_mode:
             self.num_frame_losses = 1
             self.queue_length = 1
@@ -338,13 +347,29 @@ class CustomNuScenesDataset(NuScenesDataset):
         """
         from nuscenes import NuScenes
         self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
-
-        # Visualize or evaluate results
+        
+        # Filter results based on confidence threshold if specified
+        if self.detection_conf_thresh is not None:
+            results = self.detection_conf_filter_results(results, self.detection_conf_thresh)
+        
+        # Visualize results
         if 'viz' in self.eval_mod and 'forecast_results' in results:
             preds, gts, for_gts = self.forecast_format(results['forecast_results'], results['bbox_results'], jsonfile_prefix)
             self.visualize_forecasts(jsonfile_prefix, for_gts)
+        
+        # Evaluate results
         else:
             results_dict = dict()
+            
+            # Evaluate detection metrics
+            if 'detection' in self.eval_mod or 'detection_ext' in self.eval_mod:
+                start_time = time.time()
+                if 'bbox_results' in results:
+                    results_dict.update(super().evaluate(results['bbox_results'], metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+                else:
+                    results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
+                print('Format and eval time: ', round(time.time()-start_time,1), 's')
+            
             # Evaluate forecast metrics
             if 'forecast_results' in results:
                 if 'forecast' in self.eval_mod:
@@ -357,17 +382,38 @@ class CustomNuScenesDataset(NuScenesDataset):
                     results_dict.update(self.forecast_evaluate_uniad(result_files))
                     if tmp_dir is not None:
                         tmp_dir.cleanup()
-
-            # Evaluate detection metrics
-            if 'detection' in self.eval_mod or 'detection_ext' in self.eval_mod:
-                if 'forecast_results' in results:
-                    results = results['bbox_results']
-                start_time = time.time()
-                results_dict.update(super().evaluate(results, metric, logger, jsonfile_prefix, result_names, show, out_dir, pipeline))            
-                print('Format and eval time: ', round(time.time()-start_time,1), 's')
                     
         del self.nusc
         return results_dict
+    
+    def detection_conf_filter_results(self, results, conf_thresh=0.4):
+        """Filter results based on confidence threshold.
+        
+        Args:
+            results (list[dict]): Testing results of the dataset.
+
+        Returns:
+            list[dict]: Filtered results.
+        """
+        filtered_results = {'bbox_results': [], 'forecast_results': []}
+        for bbox_result, forecast_result in zip(results['bbox_results'], results['forecast_results']):
+            mask = bbox_result['pts_bbox']['scores_3d'] >= conf_thresh
+            filtered_bbox_result = { 'pts_bbox': {
+                'boxes_3d': bbox_result['pts_bbox']['boxes_3d'][mask],
+                'scores_3d': bbox_result['pts_bbox']['scores_3d'][mask],
+                'labels_3d': bbox_result['pts_bbox']['labels_3d'][mask]
+                }
+            }
+            filtered_forecast_result = { 'pts_forecast': {
+                    'trajs_2d': forecast_result['pts_forecast']['trajs_2d'][mask],
+                    'scores_2d': forecast_result['pts_forecast']['scores_2d'][mask],
+                    'refs_2d': forecast_result['pts_forecast']['refs_2d'][mask]
+                }
+            }
+            filtered_results['bbox_results'].append(filtered_bbox_result)
+            filtered_results['forecast_results'].append(filtered_forecast_result)
+        results = filtered_results
+        return results
 
     def format_results(self, results, jsonfile_prefix=None):
         """Format the results to json (standard format for COCO evaluation).
@@ -442,6 +488,7 @@ class CustomNuScenesDataset(NuScenesDataset):
             boxes, keep_idx = lidar_nusc_box_to_global(self.data_infos[sample_id], boxes,
                                                        mapped_class_names,
                                                        self.eval_detection_configs,
+                                                       self.deteval_range,
                                                        self.eval_version)
             for i, box in enumerate(boxes):
                 name = mapped_class_names[box.label]
@@ -469,8 +516,7 @@ class CustomNuScenesDataset(NuScenesDataset):
                 # center_ = box.center.tolist()
                 # change from ground height to center height
                 # center_[2] = center_[2] + (box.wlh.tolist()[2] / 2.0)
-                if name not in ['car', 'truck', 'bus', 'trailer', 'motorcycle',
-                                'bicycle', 'pedestrian', ]:
+                if name not in self.forecast_classes: 
                     continue
 
                 box_ego = boxes_ego[keep_idx[i]]
@@ -584,6 +630,17 @@ class CustomNuScenesDataset(NuScenesDataset):
 
             # Get matched gt and predictions
             for pred_id, gt_id in zip(pred_ids, gt_ids):
+                if str(forecast_classes[pred_id]) not in self.forecast_classes:
+                    continue
+                det = forecast_cur_positions[pred_id]
+                if self.deteval_range is not None:
+                    if abs(det[0]) > self.deteval_range[0] or abs(det[1]) > self.deteval_range[1]:
+                        continue
+                else:
+                    range_limit = self.eval_detection_configs.class_range[str(forecast_classes[pred_id])]
+                    det_range = np.sqrt(np.sum((det)**2))
+                    if det_range > range_limit:
+                        continue
                 gt_pred_mask = self.data_infos[sample_id]['gt_forecasting_masks'][gt_id][1:]
                 if gt_pred_mask.sum() == 0:
                     continue
@@ -619,11 +676,6 @@ class CustomNuScenesDataset(NuScenesDataset):
 
         Args:
             result_path (str): Path of the result file.
-            logger (logging.Logger | str | None): Logger used for printing
-                related information during evaluation. Default: None.
-            metric (str): Metric name used for evaluation. Default: 'bbox'.
-            result_name (str): Result name in the metric prefix.
-                Default: 'pts_bbox'.
 
         Returns:
             dict: Dictionary of evaluation details.
@@ -632,10 +684,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         print('Evaluating forecast uniad')
         start_time = time.time()
         output_dir = osp.join(*osp.split(result_path)[:-1])
-        output_dir_det = output_dir # TODO switch to bbox and forecast paths
-        output_dir_motion = output_dir 
-        mmcv.mkdir_or_exist(output_dir_det)
-        mmcv.mkdir_or_exist(output_dir_motion)
+        mmcv.mkdir_or_exist(output_dir)
 
         eval_set_map = {
             'v1.0-mini': 'mini_train',
@@ -647,10 +696,13 @@ class CustomNuScenesDataset(NuScenesDataset):
             result_path=result_path,
             eval_set=eval_set_map[self.version],
             output_dir=output_dir,
-            verbose=False,
+            verbose=True,
             overlap_test=False,
             data_infos=self.data_infos,
-            category_convert_type='motion_category'
+            category_convert_type='motion_category',
+            conf_thresh=self.foreval_detection_conf_thresh,
+            future_seconds=self.foreval_future_seconds,
+            deteval_range=self.deteval_range,
         )
 
         detail = dict()
@@ -761,8 +813,7 @@ class CustomNuScenesDataset(NuScenesDataset):
                         metric_name = f'{metric_name_prefix}/{forecast_metric.name}'
                         results[metric_name] = agg(class_set_results)[0]
             
-            num_matches_avg = len(indices) / len(self.data_infos)
-            results[f'{metric_name_prefix}/AvgMatchRate_2'] = num_matches_avg / num_forecasts
+            results[f'{metric_name_prefix}/AvgMatchRate_2'] = len(indices) / len(self.data_infos)
             
             for result in results:
                 results[result] = round(results[result], 4)
@@ -903,7 +954,6 @@ class CustomNuScenesDataset(NuScenesDataset):
                 detail['{}/mAR_{}'.format(metric_prefix, vis_range)] = float('{:.4f}'.format(vis_metrics['mean_ar']))
         
         return detail
-
 
 @DATASETS.register_module()
 class JDMPCustomNuScenesDataset(CustomNuScenesDataset):
@@ -1116,6 +1166,7 @@ def lidar_nusc_box_to_global(info,
                              boxes,
                              classes,
                              eval_configs,
+                             eval_range,
                              eval_version='detection_cvpr_2019'):
     """Convert the box from ego to global coordinate.
     Args:
@@ -1137,11 +1188,15 @@ def lidar_nusc_box_to_global(info,
         box.rotate(Quaternion(info['lidar2ego_rotation']))
         box.translate(np.array(info['lidar2ego_translation']))
         # filter det in ego.
-        cls_range_map = eval_configs.class_range
-        radius = np.linalg.norm(box.center[:2], 2)
-        det_range = cls_range_map[classes[box.label]]
-        if radius > det_range:
-            continue
+        if eval_range is not None: 
+            x_distance, y_distance = box.center[0], box.center[1]
+            if abs(x_distance) > eval_range[0] or abs(y_distance) > eval_range[1]:
+                continue
+        else:
+            radius = np.linalg.norm(box.center[:2], 2)
+            det_range = eval_configs.class_range[classes[box.label]]
+            if radius > det_range:
+                continue
         # Move box to global coord system
         box.rotate(Quaternion(info['ego2global_rotation']))
         box.translate(np.array(info['ego2global_translation']))
