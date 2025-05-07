@@ -222,7 +222,6 @@ class NuScenesEval:
         # Filter boxes (distance, points per box, etc.).
         if verbose:
             print('Filtering predictions')
-        print(self.pred_boxes[self.pred_boxes.sample_tokens[0]][0].num_pts)
         self.pred_boxes = filter_eval_boxes(nusc, self.pred_boxes, self.cfg.class_range, verbose=verbose)
         if verbose:
             print('Filtering ground truth annotations')
@@ -232,9 +231,11 @@ class NuScenesEval:
 
         # Add distance ranges for evaluation
         self.distance_ranges = [
-            (0, 15),  # 0-15m
-            (15, 30), # 15-30m
-            (30, float('inf')), # 30+
+            (0, 10),  # 0-10m
+            (10, 20), # 10-20m
+            (20, 30), # 20-30m
+            (30, 40), # 30-40m
+            (40, float('inf')), # 40+
         ]
 
         # Add point ranges for evaluation
