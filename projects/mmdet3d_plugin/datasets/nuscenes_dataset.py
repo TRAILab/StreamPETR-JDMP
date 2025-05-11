@@ -42,7 +42,7 @@ class CustomNuScenesDataset(NuScenesDataset):
         self.seq_mode = seq_mode
         self.forecast_match_threshold = 1 # Match threshold for forecast
         self.forecast_classes = ['car', 'truck', 'bus', 'trailer', 'motorcycle', 'bicycle', 'pedestrian'] # Filter classes for forecast eval
-        self.eval_mod =  ['detection', 'forecast', 'forecast_uniad'] # Evaluation vizualization and metrics
+        self.eval_mod =  ['detection', 'forecast'] # Evaluation vizualization and metrics
         self.detection_conf_thresh = None # Result filtering detection confidence threshold
         self.foreval_detection_conf_thresh = 0.4 # Forecast evaluation detection confidence threshold
         self.foreval_future_seconds = 6 # Forecast evaluation future seconds
